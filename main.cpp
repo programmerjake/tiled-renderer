@@ -24,14 +24,7 @@
 using namespace tiled_renderer;
 
 constexpr std::size_t ValueListWidth = 4;
-typedef ValueList<float, ValueListWidth> FloatValueList;
-
-FloatValueList fn(FloatValueList v)
-{
-    for(std::size_t i = 0; i < 20; i++)
-        v *= v;
-    return v;
-}
+typedef ValueList<float, ValueListWidth> FloatList;
 
 int main()
 {

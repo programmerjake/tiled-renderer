@@ -25,6 +25,7 @@
 #include <type_traits>
 #include <utility>
 #include <cstdint>
+#include <cmath>
 
 namespace tiled_renderer
 {
