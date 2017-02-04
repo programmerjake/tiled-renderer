@@ -19,12 +19,21 @@
  *
  */
 #include "value_list.h"
+#include "vector_list.h"
+#include "matrix_list.h"
+#include "image.h"
 #include <iostream>
+#include <fstream>
+#include <cstdint>
 
 using namespace tiled_renderer;
 
 constexpr std::size_t ValueListWidth = 4;
 typedef ValueList<float, ValueListWidth> FloatList;
+typedef Vector4List<float, ValueListWidth> Vector4FList;
+typedef Vector3List<float, ValueListWidth> Vector3FList;
+typedef Image<float> DepthImage;
+typedef Image<Vector4List<std::uint8_t, 1>> ColorImage;
 
 int main()
 {

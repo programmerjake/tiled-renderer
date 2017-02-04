@@ -51,17 +51,11 @@ struct ValueList final
 {
     static_assert(N != 0, "N can't be 0");
     static_assert((N & (N - 1)) == 0, "N must be a power of 2");
-    union
-    {
-        T arrayValue[N]
+    T arrayValue[N]
 #ifndef __CDT_PARSER__
-            alignas(sizeof(T) * N)
+        alignas(sizeof(T) * N)
 #endif
-                ;
-#ifdef __GNUC__
-        T vectorValue __attribute__((vector_size(sizeof(T) * N)));
-#endif
-    };
+            ;
     ValueList() noexcept : arrayValue{}
     {
     }
@@ -133,12 +127,8 @@ struct ValueList final
     ValueList operator-() const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = -vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = -arrayValue[i];
-#endif
         return retval;
     }
     const ValueList &operator++() noexcept
@@ -177,122 +167,78 @@ struct ValueList final
     ValueList operator~() const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = !vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = ~arrayValue[i];
-#endif
         return retval;
     }
     ValueList operator*(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue * rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] * rt[i];
-#endif
         return retval;
     }
     ValueList operator/(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue / rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] / rt[i];
-#endif
         return retval;
     }
     ValueList operator%(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue % rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] % rt[i];
-#endif
         return retval;
     }
     ValueList operator+(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue + rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] + rt[i];
-#endif
         return retval;
     }
     ValueList operator-(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue - rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] - rt[i];
-#endif
         return retval;
     }
     ValueList operator<<(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue << rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] << rt[i];
-#endif
         return retval;
     }
     ValueList operator>>(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue >> rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] >> rt[i];
-#endif
         return retval;
     }
     ValueList operator&(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue & rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] & rt[i];
-#endif
         return retval;
     }
     ValueList operator|(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue | rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] | rt[i];
-#endif
         return retval;
     }
     ValueList operator^(const ValueList &rt) const noexcept
     {
         ValueList retval;
-#ifdef __GNUC__
-        retval.vectorValue = vectorValue ^ rt.vectorValue;
-#else
         for(std::size_t i = 0; i < N; i++)
             retval[i] = arrayValue[i] ^ rt[i];
-#endif
         return retval;
     }
     ValueList<bool, N> operator<(const ValueList &rt) const noexcept
