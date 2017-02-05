@@ -122,42 +122,43 @@ struct BoolByBitWidth final
     {
         return BoolByBitWidth(~value, detail::BoolByBitWidthFromUnderlyingTypeTag());
     }
-    template <std::size_t BitCount2>
-    friend constexpr BoolByBitWidth<BitCount2> operator&(
-        const BoolByBitWidth<BitCount2> &a, const BoolByBitWidth<BitCount2> &b) noexcept
-    {
-        return BoolByBitWidth<BitCount2>(a.value & b.value,
-                                         detail::BoolByBitWidthFromUnderlyingTypeTag());
-    }
-    template <std::size_t BitCount2>
-    friend constexpr BoolByBitWidth<BitCount2> operator|(
-        const BoolByBitWidth<BitCount2> &a, const BoolByBitWidth<BitCount2> &b) noexcept
-    {
-        return BoolByBitWidth<BitCount2>(a.value | b.value,
-                                         detail::BoolByBitWidthFromUnderlyingTypeTag());
-    }
-    template <std::size_t BitCount2>
-    friend constexpr BoolByBitWidth<BitCount2> operator^(
-        const BoolByBitWidth<BitCount2> &a, const BoolByBitWidth<BitCount2> &b) noexcept
-    {
-        return BoolByBitWidth<BitCount2>(a.value ^ b.value,
-                                         detail::BoolByBitWidthFromUnderlyingTypeTag());
-    }
-    template <std::size_t BitCount2>
-    friend void operator&&(const BoolByBitWidth<BitCount2> &a,
-                           const BoolByBitWidth<BitCount2> &b) noexcept = delete;
-    template <std::size_t BitCount2>
-    friend void operator||(const BoolByBitWidth<BitCount2> &a,
-                           const BoolByBitWidth<BitCount2> &b) noexcept = delete;
-    template <std::size_t BitCount2>
-    friend void operator&&(const BoolByBitWidth<BitCount2> &a, bool b) noexcept = delete;
-    template <std::size_t BitCount2>
-    friend void operator||(const BoolByBitWidth<BitCount2> &a, bool b) noexcept = delete;
-    template <std::size_t BitCount2>
-    friend void operator&&(bool a, const BoolByBitWidth<BitCount2> &b) noexcept = delete;
-    template <std::size_t BitCount2>
-    friend void operator||(bool a, const BoolByBitWidth<BitCount2> &b) noexcept = delete;
 };
+
+template <std::size_t BitCount2>
+constexpr BoolByBitWidth<BitCount2> operator&(const BoolByBitWidth<BitCount2> &a,
+                                              const BoolByBitWidth<BitCount2> &b) noexcept
+{
+    return BoolByBitWidth<BitCount2>(a.value & b.value,
+                                     detail::BoolByBitWidthFromUnderlyingTypeTag());
+}
+template <std::size_t BitCount2>
+constexpr BoolByBitWidth<BitCount2> operator|(const BoolByBitWidth<BitCount2> &a,
+                                              const BoolByBitWidth<BitCount2> &b) noexcept
+{
+    return BoolByBitWidth<BitCount2>(a.value | b.value,
+                                     detail::BoolByBitWidthFromUnderlyingTypeTag());
+}
+template <std::size_t BitCount2>
+constexpr BoolByBitWidth<BitCount2> operator^(const BoolByBitWidth<BitCount2> &a,
+                                              const BoolByBitWidth<BitCount2> &b) noexcept
+{
+    return BoolByBitWidth<BitCount2>(a.value ^ b.value,
+                                     detail::BoolByBitWidthFromUnderlyingTypeTag());
+}
+template <std::size_t BitCount2>
+void operator&&(const BoolByBitWidth<BitCount2> &a,
+                const BoolByBitWidth<BitCount2> &b) noexcept = delete;
+template <std::size_t BitCount2>
+void operator||(const BoolByBitWidth<BitCount2> &a,
+                const BoolByBitWidth<BitCount2> &b) noexcept = delete;
+template <std::size_t BitCount2>
+void operator&&(const BoolByBitWidth<BitCount2> &a, bool b) noexcept = delete;
+template <std::size_t BitCount2>
+void operator||(const BoolByBitWidth<BitCount2> &a, bool b) noexcept = delete;
+template <std::size_t BitCount2>
+void operator&&(bool a, const BoolByBitWidth<BitCount2> &b) noexcept = delete;
+template <std::size_t BitCount2>
+void operator||(bool a, const BoolByBitWidth<BitCount2> &b) noexcept = delete;
 
 typedef BoolByBitWidth<8> Bool8;
 static_assert(sizeof(Bool8) == sizeof(std::int8_t) && alignof(Bool8) == alignof(std::int8_t),
@@ -1065,20 +1066,17 @@ TILED_RENDERER_VALUE_LIST_CAST(float, std::int32_t, __m128, __m128i, 4, _mm_cvte
                         const ValueList<Type, ElementCount> &l,          \
                         const ValueList<Type, ElementCount> &r) noexcept \
         {                                                                \
-            union                                                        \
+            union U                                                      \
             {                                                            \
-                __m128 lVector;                                          \
-                ValueList<Type, ElementCount> lValueList;                \
+                __m128 vector;                                           \
+                ValueList<Type, ElementCount> valueList;                 \
             };                                                           \
-            union                                                        \
-            {                                                            \
-                __m128 rVector;                                          \
-                ValueList<Type, ElementCount> rValueList;                \
-            };                                                           \
-            lValueList = l;                                              \
-            rValueList = r;                                              \
-            lVector = _mm_and_ps(lVector, rVector);                      \
-            retval = lValueList;                                         \
+            U lValue{};                                                  \
+            U rValue{};                                                  \
+            lValue.valueList = l;                                        \
+            rValue.valueList = r;                                        \
+            lValue.vector = _mm_and_ps(lValue.vector, rValue.vector);    \
+            retval = lValue.valueList;                                   \
         }                                                                \
     };                                                                   \
     template <>                                                          \
@@ -1088,20 +1086,17 @@ TILED_RENDERER_VALUE_LIST_CAST(float, std::int32_t, __m128, __m128i, 4, _mm_cvte
                         const ValueList<Type, ElementCount> &l,          \
                         const ValueList<Type, ElementCount> &r) noexcept \
         {                                                                \
-            union                                                        \
+            union U                                                      \
             {                                                            \
-                __m128 lVector;                                          \
-                ValueList<Type, ElementCount> lValueList;                \
+                __m128 vector;                                           \
+                ValueList<Type, ElementCount> valueList;                 \
             };                                                           \
-            union                                                        \
-            {                                                            \
-                __m128 rVector;                                          \
-                ValueList<Type, ElementCount> rValueList;                \
-            };                                                           \
-            lValueList = l;                                              \
-            rValueList = r;                                              \
-            lVector = _mm_or_ps(lVector, rVector);                       \
-            retval = lValueList;                                         \
+            U lValue{};                                                  \
+            U rValue{};                                                  \
+            lValue.valueList = l;                                        \
+            rValue.valueList = r;                                        \
+            lValue.vector = _mm_or_ps(lValue.vector, rValue.vector);     \
+            retval = lValue.valueList;                                   \
         }                                                                \
     };                                                                   \
     template <>                                                          \
@@ -1111,20 +1106,17 @@ TILED_RENDERER_VALUE_LIST_CAST(float, std::int32_t, __m128, __m128i, 4, _mm_cvte
                         const ValueList<Type, ElementCount> &l,          \
                         const ValueList<Type, ElementCount> &r) noexcept \
         {                                                                \
-            union                                                        \
+            union U                                                      \
             {                                                            \
-                __m128 lVector;                                          \
-                ValueList<Type, ElementCount> lValueList;                \
+                __m128 vector;                                           \
+                ValueList<Type, ElementCount> valueList;                 \
             };                                                           \
-            union                                                        \
-            {                                                            \
-                __m128 rVector;                                          \
-                ValueList<Type, ElementCount> rValueList;                \
-            };                                                           \
-            lValueList = l;                                              \
-            rValueList = r;                                              \
-            lVector = _mm_xor_ps(lVector, rVector);                      \
-            retval = lValueList;                                         \
+            U lValue{};                                                  \
+            U rValue{};                                                  \
+            lValue.valueList = l;                                        \
+            rValue.valueList = r;                                        \
+            lValue.vector = _mm_xor_ps(lValue.vector, rValue.vector);    \
+            retval = lValue.valueList;                                   \
         }                                                                \
     };                                                                   \
     }
@@ -1150,20 +1142,17 @@ TILED_RENDERER_VALUE_LIST_BITWISE_128(std::int64_t, 2)
                         const ValueList<Type, ElementCount> &l,              \
                         const ValueList<Type, ElementCount> &r) noexcept     \
         {                                                                    \
-            union                                                            \
+            union U                                                          \
             {                                                                \
-                __m128i lVector;                                             \
-                ValueList<Type, ElementCount> lValueList;                    \
+                __m128i vector;                                              \
+                ValueList<Type, ElementCount> valueList;                     \
             };                                                               \
-            union                                                            \
-            {                                                                \
-                __m128i rVector;                                             \
-                ValueList<Type, ElementCount> rValueList;                    \
-            };                                                               \
-            lValueList = l;                                                  \
-            rValueList = r;                                                  \
-            lVector = AddOp(lVector, rVector);                               \
-            retval = lValueList;                                             \
+            U lValue{};                                                      \
+            U rValue{};                                                      \
+            lValue.valueList = l;                                            \
+            rValue.valueList = r;                                            \
+            lValue.vector = AddOp(lValue.vector, rValue.vector);             \
+            retval = lValue.valueList;                                       \
         }                                                                    \
     };                                                                       \
     template <>                                                              \
@@ -1173,20 +1162,17 @@ TILED_RENDERER_VALUE_LIST_BITWISE_128(std::int64_t, 2)
                         const ValueList<Type, ElementCount> &l,              \
                         const ValueList<Type, ElementCount> &r) noexcept     \
         {                                                                    \
-            union                                                            \
+            union U                                                          \
             {                                                                \
-                __m128i lVector;                                             \
-                ValueList<Type, ElementCount> lValueList;                    \
+                __m128i vector;                                              \
+                ValueList<Type, ElementCount> valueList;                     \
             };                                                               \
-            union                                                            \
-            {                                                                \
-                __m128i rVector;                                             \
-                ValueList<Type, ElementCount> rValueList;                    \
-            };                                                               \
-            lValueList = l;                                                  \
-            rValueList = r;                                                  \
-            lVector = SubOp(lVector, rVector);                               \
-            retval = lValueList;                                             \
+            U lValue{};                                                      \
+            U rValue{};                                                      \
+            lValue.valueList = l;                                            \
+            rValue.valueList = r;                                            \
+            lValue.vector = SubOp(lValue.vector, rValue.vector);             \
+            retval = lValue.valueList;                                       \
         }                                                                    \
     };                                                                       \
     }
@@ -1216,12 +1202,12 @@ TILED_RENDERER_VALUE_LIST_SIGNLESS(std::int64_t, 2, _mm_add_epi64, _mm_sub_epi64
             union                                                        \
             {                                                            \
                 VectorType lVector;                                      \
-                ValueList<Type, ElementCount> lValueList;                \
+                ValueList<Type, ElementCount> lValueList{};              \
             };                                                           \
             union                                                        \
             {                                                            \
                 VectorType rVector;                                      \
-                ValueList<Type, ElementCount> rValueList;                \
+                ValueList<Type, ElementCount> rValueList{};              \
             };                                                           \
             lValueList = l;                                              \
             rValueList = r;                                              \
@@ -1239,12 +1225,12 @@ TILED_RENDERER_VALUE_LIST_SIGNLESS(std::int64_t, 2, _mm_add_epi64, _mm_sub_epi64
             union                                                        \
             {                                                            \
                 VectorType lVector;                                      \
-                ValueList<Type, ElementCount> lValueList;                \
+                ValueList<Type, ElementCount> lValueList{};              \
             };                                                           \
             union                                                        \
             {                                                            \
                 VectorType rVector;                                      \
-                ValueList<Type, ElementCount> rValueList;                \
+                ValueList<Type, ElementCount> rValueList{};              \
             };                                                           \
             lValueList = l;                                              \
             rValueList = r;                                              \
@@ -1262,12 +1248,12 @@ TILED_RENDERER_VALUE_LIST_SIGNLESS(std::int64_t, 2, _mm_add_epi64, _mm_sub_epi64
             union                                                        \
             {                                                            \
                 VectorType lVector;                                      \
-                ValueList<Type, ElementCount> lValueList;                \
+                ValueList<Type, ElementCount> lValueList{};              \
             };                                                           \
             union                                                        \
             {                                                            \
                 VectorType rVector;                                      \
-                ValueList<Type, ElementCount> rValueList;                \
+                ValueList<Type, ElementCount> rValueList{};              \
             };                                                           \
             lValueList = l;                                              \
             rValueList = r;                                              \
@@ -1285,12 +1271,12 @@ TILED_RENDERER_VALUE_LIST_SIGNLESS(std::int64_t, 2, _mm_add_epi64, _mm_sub_epi64
             union                                                        \
             {                                                            \
                 VectorType lVector;                                      \
-                ValueList<Type, ElementCount> lValueList;                \
+                ValueList<Type, ElementCount> lValueList{};              \
             };                                                           \
             union                                                        \
             {                                                            \
                 VectorType rVector;                                      \
-                ValueList<Type, ElementCount> rValueList;                \
+                ValueList<Type, ElementCount> rValueList{};              \
             };                                                           \
             lValueList = l;                                              \
             rValueList = r;                                              \
@@ -1321,17 +1307,17 @@ TILED_RENDERER_VALUE_LIST_FLOATING_POINT(
             union                                                               \
             {                                                                   \
                 VectorType lVector;                                             \
-                ValueList<Type, ElementCount> lValueList;                       \
+                ValueList<Type, ElementCount> lValueList{};                     \
             };                                                                  \
             union                                                               \
             {                                                                   \
                 VectorType rVector;                                             \
-                ValueList<Type, ElementCount> rValueList;                       \
+                ValueList<Type, ElementCount> rValueList{};                     \
             };                                                                  \
             union                                                               \
             {                                                                   \
                 BVectorType dVector;                                            \
-                ValueList<BType, ElementCount> dValueList;                      \
+                ValueList<BType, ElementCount> dValueList{};                    \
             };                                                                  \
             lValueList = l;                                                     \
             rValueList = r;                                                     \
@@ -1349,17 +1335,17 @@ TILED_RENDERER_VALUE_LIST_FLOATING_POINT(
             union                                                               \
             {                                                                   \
                 VectorType lVector;                                             \
-                ValueList<Type, ElementCount> lValueList;                       \
+                ValueList<Type, ElementCount> lValueList{};                     \
             };                                                                  \
             union                                                               \
             {                                                                   \
                 VectorType rVector;                                             \
-                ValueList<Type, ElementCount> rValueList;                       \
+                ValueList<Type, ElementCount> rValueList{};                     \
             };                                                                  \
             union                                                               \
             {                                                                   \
                 BVectorType dVector;                                            \
-                ValueList<BType, ElementCount> dValueList;                      \
+                ValueList<BType, ElementCount> dValueList{};                    \
             };                                                                  \
             lValueList = l;                                                     \
             rValueList = r;                                                     \
@@ -1377,17 +1363,17 @@ TILED_RENDERER_VALUE_LIST_FLOATING_POINT(
             union                                                               \
             {                                                                   \
                 VectorType lVector;                                             \
-                ValueList<Type, ElementCount> lValueList;                       \
+                ValueList<Type, ElementCount> lValueList{};                     \
             };                                                                  \
             union                                                               \
             {                                                                   \
                 VectorType rVector;                                             \
-                ValueList<Type, ElementCount> rValueList;                       \
+                ValueList<Type, ElementCount> rValueList{};                     \
             };                                                                  \
             union                                                               \
             {                                                                   \
                 BVectorType dVector;                                            \
-                ValueList<BType, ElementCount> dValueList;                      \
+                ValueList<BType, ElementCount> dValueList{};                    \
             };                                                                  \
             lValueList = l;                                                     \
             rValueList = r;                                                     \
@@ -1405,17 +1391,17 @@ TILED_RENDERER_VALUE_LIST_FLOATING_POINT(
             union                                                               \
             {                                                                   \
                 VectorType lVector;                                             \
-                ValueList<Type, ElementCount> lValueList;                       \
+                ValueList<Type, ElementCount> lValueList{};                     \
             };                                                                  \
             union                                                               \
             {                                                                   \
                 VectorType rVector;                                             \
-                ValueList<Type, ElementCount> rValueList;                       \
+                ValueList<Type, ElementCount> rValueList{};                     \
             };                                                                  \
             union                                                               \
             {                                                                   \
                 BVectorType dVector;                                            \
-                ValueList<BType, ElementCount> dValueList;                      \
+                ValueList<BType, ElementCount> dValueList{};                    \
             };                                                                  \
             lValueList = l;                                                     \
             rValueList = r;                                                     \
