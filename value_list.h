@@ -570,7 +570,7 @@ ValueList<To, N> reinterpret(const ValueList<From, N> &v) noexcept
     {
         ValueList<To, N> retval;
         ValueList<From, N> source;
-    } u;
+    } u{};
     u.source = v;
     return u.retval;
 }
