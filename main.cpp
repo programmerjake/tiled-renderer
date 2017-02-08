@@ -1,19 +1,19 @@
 /*
- * Copyright (C) 2012-2017 Jacob R. Lifshay
- * This file is part of Voxels.
+ * Copyright (C) 2017 Jacob R. Lifshay
+ * This file is part of Tiled-Renderer.
  *
- * Voxels is free software; you can redistribute it and/or modify
+ * Tiled-Renderer is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * Voxels is distributed in the hope that it will be useful,
+ * Tiled-Renderer is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Voxels; if not, write to the Free Software
+ * along with Tiled-Renderer; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
  * MA 02110-1301, USA.
  *
@@ -27,20 +27,23 @@
 #include <cstdint>
 #include <cassert>
 #include <string>
+#include "SDL.h"
 
 using namespace tiled_renderer;
 
-constexpr std::size_t Log2ValueListSize = 2;
+constexpr std::size_t Log2ValueListSize = 8;
 constexpr std::size_t ValueListSize = static_cast<std::size_t>(1) << Log2ValueListSize;
 typedef ValueList<float, ValueListSize> FloatList;
 typedef ValueList<std::int32_t, ValueListSize> I32List;
 typedef ValueList<Bool32, ValueListSize> Bool32List;
 typedef Vector4List<float, ValueListSize> Vector4FList;
+typedef Vector4List<float, 1> Vector4F;
 typedef Vector4List<std::int32_t, ValueListSize> Vector4I32List;
 typedef Vector3List<float, ValueListSize> Vector3FList;
 typedef Image<float> DepthImage;
 typedef Vector4List<std::uint8_t, 1> Color;
 typedef Image<Color> ColorImage;
+typedef Matrix4x4List<1> Matrix4x4;
 
 template <std::size_t Level>
 struct ChunkLevel;
@@ -268,11 +271,11 @@ struct TriangleRenderState final
         Bool32List triangleCountMask(true);
         for(std::size_t i = triangleCount; i < ValueListSize; i++)
             triangleCountMask[i] = false;
-        FloatList divisor =
+        FloatList signedArea =
             (triangleP1.w * triangleP2.x - triangleP2.w * triangleP1.x) * triangleP3.y
             + (triangleP3.w * triangleP1.x - triangleP1.w * triangleP3.x) * triangleP2.y
             + (triangleP2.w * triangleP3.x - triangleP3.w * triangleP2.x) * triangleP1.y;
-        drawTriangleMask &= divisor > FloatList(0);
+        drawTriangleMask &= signedArea > FloatList(0);
         drawTriangleMask &= triangleCountMask;
         if(!reduce(
                [](Bool32 a, Bool32 b)
@@ -281,26 +284,40 @@ struct TriangleRenderState final
                },
                drawTriangleMask))
             return false;
-        FloatList factor =
-            FloatList(static_cast<std::uint64_t>(1) << EdgeEquationFractionalBits) / divisor;
-        FloatList triangleP1WFactor = triangleP1.w * factor;
-        FloatList triangleP2WFactor = triangleP2.w * factor;
-        FloatList triangleP3WFactor = triangleP3.w * factor;
         FloatList edgeEquationConstantsF[3] = {
-            (triangleP2.x * triangleP3.y - triangleP3.x * triangleP2.y) * triangleP1WFactor,
-            (triangleP3.x * triangleP1.y - triangleP1.x * triangleP3.y) * triangleP2WFactor,
-            (triangleP1.x * triangleP2.y - triangleP2.x * triangleP1.y) * triangleP3WFactor,
+            triangleP2.x * triangleP3.y - triangleP3.x * triangleP2.y,
+            triangleP3.x * triangleP1.y - triangleP1.x * triangleP3.y,
+            triangleP1.x * triangleP2.y - triangleP2.x * triangleP1.y,
         };
         FloatList edgeEquationXStepsF[3] = {
-            (triangleP2.y * triangleP3.w - triangleP3.y * triangleP2.w) * triangleP1WFactor,
-            (triangleP3.y * triangleP1.w - triangleP1.y * triangleP3.w) * triangleP2WFactor,
-            (triangleP1.y * triangleP2.w - triangleP2.y * triangleP1.w) * triangleP3WFactor,
+            triangleP2.y * triangleP3.w - triangleP3.y * triangleP2.w,
+            triangleP3.y * triangleP1.w - triangleP1.y * triangleP3.w,
+            triangleP1.y * triangleP2.w - triangleP2.y * triangleP1.w,
         };
         FloatList edgeEquationYStepsF[3] = {
-            (triangleP3.x * triangleP2.w - triangleP2.x * triangleP3.w) * triangleP1WFactor,
-            (triangleP1.x * triangleP3.w - triangleP3.x * triangleP1.w) * triangleP2WFactor,
-            (triangleP2.x * triangleP1.w - triangleP1.x * triangleP2.w) * triangleP3WFactor,
+            triangleP3.x * triangleP2.w - triangleP2.x * triangleP3.w,
+            triangleP1.x * triangleP3.w - triangleP3.x * triangleP1.w,
+            triangleP2.x * triangleP1.w - triangleP1.x * triangleP2.w,
         };
+        FloatList edgeEquationSigns[3] = {
+            signedArea * triangleP1.w, signedArea * triangleP2.w, signedArea * triangleP3.w,
+        };
+        for(std::size_t i = 0; i < 3; i++)
+        {
+            FloatList scaleFactor = map(
+                [](float a, float b) -> float
+                {
+                    return static_cast<float>(static_cast<std::uint64_t>(1)
+                                              << EdgeEquationFractionalBits)
+                           / (std::fabs(a) + std::fabs(b));
+                },
+                edgeEquationXStepsF[i],
+                edgeEquationYStepsF[i]);
+            scaleFactor = select(edgeEquationSigns[i] > 0, scaleFactor, -scaleFactor);
+            edgeEquationConstantsF[i] *= scaleFactor;
+            edgeEquationXStepsF[i] *= scaleFactor;
+            edgeEquationYStepsF[i] *= scaleFactor;
+        }
         FloatList edgeEquationTrivialRejectX[3] = {};
         FloatList edgeEquationTrivialRejectY[3] = {};
         FloatList edgeEquationTrivialAcceptX[3] = {};
@@ -411,6 +428,8 @@ struct RenderTriangleHelper<0, needsEdgeEquation0, needsEdgeEquation1, needsEdge
             if(passingPixels[i])
             {
 #warning finish
+                auto previousColor =
+                    renderState.colorImage.getElement(xPositions[i], yPositions[i], 0);
                 renderState.colorImage.setElement(
                     xPositions[i], yPositions[i], 0, renderState.drawColors.colors[triangleIndex]);
             }
@@ -509,69 +528,85 @@ void renderTriangles(ColorImage &colorImage,
     }
 }
 
-void getTriangle(std::size_t triangleIndex,
-                 Color &color,
-                 float &x1,
-                 float &y1,
-                 float &z1,
-                 float &w1,
-                 float &x2,
-                 float &y2,
-                 float &z2,
-                 float &w2,
-                 float &x3,
-                 float &y3,
-                 float &z3,
-                 float &w3)
+Vector4F getPoint(float u, float v)
 {
-    if(triangleIndex & 1)
+    u *= 2 * M_PI;
+    v *= M_PI;
+    return Vector4F(std::sin(u) * std::sin(v), std::cos(v), std::cos(u) * std::sin(v), 1);
+}
+
+void getTriangle(std::size_t triangleIndex,
+                 std::size_t uCount,
+                 std::size_t vCount,
+                 Color &color,
+                 Vector4F &p1,
+                 Vector4F &p2,
+                 Vector4F &p3)
+{
+    color = Color(triangleIndex & 0x1 ? 0xFF : 0,
+                  triangleIndex & 0x2 ? 0xFF : 0,
+                  triangleIndex & 0x4 ? 0xFF : 0,
+                  0xFF);
+    bool isSecondPartOfQuad = triangleIndex % 2;
+    triangleIndex /= 2;
+    float u0 = static_cast<float>(triangleIndex % uCount) / uCount;
+    float v0 = static_cast<float>(triangleIndex / uCount) / vCount;
+    float u1 = static_cast<float>(triangleIndex % uCount + 1) / uCount;
+    float v1 = static_cast<float>(triangleIndex / uCount + 1) / vCount;
+    if(isSecondPartOfQuad)
     {
-        color = Color(0xFF, 0, 0, 0xFF);
-        x1 = 10 + triangleIndex * 100;
-        y1 = 10;
-        z1 = 1;
-        w1 = 1;
-
-        x2 = 210 + triangleIndex * 100;
-        y2 = 10;
-        z2 = 1;
-        w2 = 1;
-
-        x3 = 110 + triangleIndex * 100;
-        y3 = 110;
-        z3 = 1;
-        w3 = 1;
+        p1 = getPoint(u0, v0);
+        p2 = getPoint(u1, v0);
+        p3 = getPoint(u1, v1);
     }
     else
     {
-        color = Color(0, 0, 0xFF, 0xFF);
-        x1 = 110 + triangleIndex * 100;
-        y1 = 10;
-        z1 = 1;
-        w1 = 1;
-
-        x2 = 210 + triangleIndex * 100;
-        y2 = 110;
-        z2 = 1;
-        w2 = 1;
-
-        x3 = 10 + triangleIndex * 100;
-        y3 = 110;
-        z3 = 1;
-        w3 = 1;
+        p1 = getPoint(u0, v0);
+        p2 = getPoint(u1, v1);
+        p3 = getPoint(u0, v1);
     }
-    w1 += 0.001f * x1;
-    w2 += 0.001f * x2;
-    w3 += 0.001f * x3;
 }
 
 int main()
 {
-    ColorImage colorImage(1280, 720, 1);
-    DepthImage depthImage(1280, 720, 1);
-    clearImage(colorImage, 0, {0, 0xFF, 0, 0xFF});
+    ColorImage colorImage(1920, 1080, 1);
+    DepthImage depthImage(1920, 1080, 1);
+    clearImage(colorImage, 0, {0x20, 0x20, 0x20, 0xFF});
     clearImage(depthImage, 0, INFINITY);
-    std::size_t triangleCount = 10;
+    Matrix4x4 tform;
+    tform = Matrix4x4::rotateY(0.1f);
+    tform = tform.concat(Matrix4x4::translate(0, 0, -2));
+    float scaleX = colorImage.getWidth();
+    float scaleY = colorImage.getHeight();
+    scaleX /= colorImage.getHeight();
+    scaleY /= colorImage.getWidth();
+    if(scaleX < 1)
+        scaleX = 1;
+    if(scaleY < 1)
+        scaleY = 1;
+    float nearPlane = 0.01f;
+    float farPlane = 100.0f;
+    tform = tform.concat(Matrix4x4::frustum(-nearPlane * scaleX,
+                                            nearPlane * scaleX,
+                                            -nearPlane * scaleY,
+                                            nearPlane * scaleY,
+                                            nearPlane,
+                                            farPlane));
+    tform = tform.concat(Matrix4x4(colorImage.getWidth() / 2.0f,
+                                   0,
+                                   0,
+                                   colorImage.getWidth() / 2.0f,
+                                   0,
+                                   colorImage.getHeight() / -2.0f,
+                                   0,
+                                   colorImage.getHeight() / 2.0f,
+                                   0,
+                                   0,
+                                   0.5f,
+                                   0.5f));
+    std::size_t uCount = 10;
+    std::size_t vCount = 10;
+    std::size_t triangleCount = uCount * vCount * 2;
     for(std::size_t triangleIndex = 0; triangleIndex < triangleCount;
         triangleIndex += ValueListSize)
     {
@@ -582,22 +617,37 @@ int main()
             triangleRenderCount = ValueListSize;
         for(std::size_t i = 0; i < triangleRenderCount; i++)
         {
+            Vector4F currentP1, currentP2, currentP3;
             getTriangle(triangleIndex + i,
+                        uCount,
+                        vCount,
                         colors.colors[i],
-                        p1.x[i],
-                        p1.y[i],
-                        p1.z[i],
-                        p1.w[i],
-                        p2.x[i],
-                        p2.y[i],
-                        p2.z[i],
-                        p2.w[i],
-                        p3.x[i],
-                        p3.y[i],
-                        p3.z[i],
-                        p3.w[i]);
+                        currentP1,
+                        currentP2,
+                        currentP3);
+            p1.x[i] = currentP1.x[0];
+            p1.y[i] = currentP1.y[0];
+            p1.z[i] = currentP1.z[0];
+            p1.w[i] = currentP1.w[0];
+            p2.x[i] = currentP2.x[0];
+            p2.y[i] = currentP2.y[0];
+            p2.z[i] = currentP2.z[0];
+            p2.w[i] = currentP2.w[0];
+            p3.x[i] = currentP3.x[0];
+            p3.y[i] = currentP3.y[0];
+            p3.z[i] = currentP3.z[0];
+            p3.w[i] = currentP3.w[0];
         }
-        renderTriangles(colorImage, depthImage, p1, p2, p3, colors, triangleRenderCount);
+        renderTriangles(colorImage,
+                        depthImage,
+                        tform.apply(p1),
+                        tform.apply(p2),
+                        tform.apply(p3),
+                        colors,
+                        triangleRenderCount);
+        std::cout << static_cast<int>((triangleIndex + triangleRenderCount) * 100 / triangleCount)
+                  << "%...\r" << std::flush;
     }
+    std::cout << "done.                    " << std::endl;
     writeImage("out.ppm", colorImage);
 }

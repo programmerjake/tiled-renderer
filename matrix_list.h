@@ -1,19 +1,19 @@
 /*
- * Copyright (C) 2012-2017 Jacob R. Lifshay
- * This file is part of Voxels.
+ * Copyright (C) 2017 Jacob R. Lifshay
+ * This file is part of Tiled-Renderer.
  *
- * Voxels is free software; you can redistribute it and/or modify
+ * Tiled-Renderer is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * Voxels is distributed in the hope that it will be useful,
+ * Tiled-Renderer is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Voxels; if not, write to the Free Software
+ * along with Tiled-Renderer; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
  * MA 02110-1301, USA.
  *
@@ -27,6 +27,12 @@
 
 namespace tiled_renderer
 {
+namespace detail
+{
+template <std::size_t N, std::size_t N2>
+struct MatrixApplyHelper;
+}
+
 template <std::size_t N>
 struct Matrix4x4List final
 {
@@ -100,6 +106,35 @@ struct Matrix4x4List final
                                     ValueList<float, N>(0),
                                     ValueList<float, N>(1)},
                                }
+    {
+    }
+    Matrix4x4List(const Matrix4x4List<1> &rt) noexcept
+        : elements{
+              {
+               ValueList<float, N>(rt.elements[0][0]),
+               ValueList<float, N>(rt.elements[0][1]),
+               ValueList<float, N>(rt.elements[0][2]),
+               ValueList<float, N>(rt.elements[0][3]),
+              },
+              {
+               ValueList<float, N>(rt.elements[1][0]),
+               ValueList<float, N>(rt.elements[1][1]),
+               ValueList<float, N>(rt.elements[1][2]),
+               ValueList<float, N>(rt.elements[1][3]),
+              },
+              {
+               ValueList<float, N>(rt.elements[2][0]),
+               ValueList<float, N>(rt.elements[2][1]),
+               ValueList<float, N>(rt.elements[2][2]),
+               ValueList<float, N>(rt.elements[2][3]),
+              },
+              {
+               ValueList<float, N>(rt.elements[3][0]),
+               ValueList<float, N>(rt.elements[3][1]),
+               ValueList<float, N>(rt.elements[3][2]),
+               ValueList<float, N>(rt.elements[3][3]),
+              },
+          }
     {
     }
     static Matrix4x4List identity() noexcept
@@ -329,19 +364,65 @@ struct Matrix4x4List final
                 + elements[3][2] * rt[2][3]
                 + elements[3][3] * rt[3][3]);
     }
-    Vector4List<float, N> apply(const Vector4List<float, N> &v) const noexcept
+    template <std::size_t N2>
+    Vector4List<float, N2> apply(const Vector4List<float, N2> &v) const noexcept
     {
-        return Vector4List<float, N>(
-            v.x * elements[0][0] + v.y * elements[1][0] + v.z * elements[2][0]
-                + v.w * elements[3][0],
-            v.x * elements[0][1] + v.y * elements[1][1] + v.z * elements[2][1]
-                + v.w * elements[3][1],
-            v.x * elements[0][2] + v.y * elements[1][2] + v.z * elements[2][2]
-                + v.w * elements[3][2],
-            v.x * elements[0][3] + v.y * elements[1][3] + v.z * elements[2][3]
-                + v.w * elements[3][3]);
+        return detail::MatrixApplyHelper<N, N2>::run(*this, v);
     }
 };
+
+namespace detail
+{
+template <std::size_t N, std::size_t N2>
+struct MatrixApplyHelper final
+{
+    static Vector4List<float, N2> run(const Matrix4x4List<N> &m,
+                                      const Vector4List<float, N2> &v) noexcept = delete;
+};
+
+template <std::size_t N>
+struct MatrixApplyHelper<1, N> final
+{
+    static Vector4List<float, N> run(const Matrix4x4List<1> &m,
+                                     const Vector4List<float, N> &v) noexcept
+    {
+        return Vector4List<float, N>(v.x * ValueList<float, N>(m.elements[0][0])
+                                         + v.y * ValueList<float, N>(m.elements[1][0])
+                                         + v.z * ValueList<float, N>(m.elements[2][0])
+                                         + v.w * ValueList<float, N>(m.elements[3][0]),
+                                     v.x * ValueList<float, N>(m.elements[0][1])
+                                         + v.y * ValueList<float, N>(m.elements[1][1])
+                                         + v.z * ValueList<float, N>(m.elements[2][1])
+                                         + v.w * ValueList<float, N>(m.elements[3][1]),
+                                     v.x * ValueList<float, N>(m.elements[0][2])
+                                         + v.y * ValueList<float, N>(m.elements[1][2])
+                                         + v.z * ValueList<float, N>(m.elements[2][2])
+                                         + v.w * ValueList<float, N>(m.elements[3][2]),
+                                     v.x * ValueList<float, N>(m.elements[0][3])
+                                         + v.y * ValueList<float, N>(m.elements[1][3])
+                                         + v.z * ValueList<float, N>(m.elements[2][3])
+                                         + v.w * ValueList<float, N>(m.elements[3][3]));
+    }
+};
+
+template <std::size_t N>
+struct MatrixApplyHelper<N, N> final
+{
+    static Vector4List<float, N> run(const Matrix4x4List<N> &m,
+                                     const Vector4List<float, N> &v) noexcept
+    {
+        return Vector4List<float, N>(
+            v.x * m.elements[0][0] + v.y * m.elements[1][0] + v.z * m.elements[2][0]
+                + v.w * m.elements[3][0],
+            v.x * m.elements[0][1] + v.y * m.elements[1][1] + v.z * m.elements[2][1]
+                + v.w * m.elements[3][1],
+            v.x * m.elements[0][2] + v.y * m.elements[1][2] + v.z * m.elements[2][2]
+                + v.w * m.elements[3][2],
+            v.x * m.elements[0][3] + v.y * m.elements[1][3] + v.z * m.elements[2][3]
+                + v.w * m.elements[3][3]);
+    }
+};
+}
 }
 
 #endif /* MATRIX_LIST_H_ */
