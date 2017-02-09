@@ -1018,408 +1018,393 @@ ValueList<T, N> select(const ValueList<typename BoolForType<T>::type, N> &condit
 }
 }
 
-#ifdef __SSE2__
-#include <emmintrin.h>
+#ifdef __clang__
 namespace tiled_renderer
 {
-#define TILED_RENDERER_VALUE_LIST_CAST(                                               \
-    DestType, SourceType, DestVector, SourceVector, ElementCount, ConversionFunction) \
-    namespace detail                                                                  \
-    {                                                                                 \
-    template <>                                                                       \
-    struct ValueListCast<DestType, SourceType, ElementCount> final                    \
-    {                                                                                 \
-        static void run(ValueList<DestType, ElementCount> &retval,                    \
-                        const ValueList<SourceType, ElementCount> &value) noexcept    \
-        {                                                                             \
-            union                                                                     \
-            {                                                                         \
-                DestVector vector;                                                    \
-                ValueList<DestType, ElementCount> valueList;                          \
-            } dest{};                                                                 \
-            union                                                                     \
-            {                                                                         \
-                SourceVector vector;                                                  \
-                ValueList<SourceType, ElementCount> valueList;                        \
-            } src{};                                                                  \
-            src.valueList = value;                                                    \
-            dest.vector = ConversionFunction(src.vector);                             \
-            retval = dest.valueList;                                                  \
-        }                                                                             \
-    };                                                                                \
+namespace detail
+{
+template <typename T, std::size_t N>
+struct BuiltinVector final
+{
+#ifdef __CDT_PARSER__
+    typedef void type;
+#endif
+};
+#define TILED_RENDERER_VECTOR_TYPE(T, N)                            \
+    template <>                                                     \
+    struct BuiltinVector<T, N> final                                \
+    {                                                               \
+        typedef T type __attribute__((vector_size(sizeof(T) * N))); \
     }
+#define TILED_RENDERER_VECTOR_TYPES(N)            \
+    TILED_RENDERER_VECTOR_TYPE(std::int8_t, N);   \
+    TILED_RENDERER_VECTOR_TYPE(std::uint8_t, N);  \
+    TILED_RENDERER_VECTOR_TYPE(std::int16_t, N);  \
+    TILED_RENDERER_VECTOR_TYPE(std::uint16_t, N); \
+    TILED_RENDERER_VECTOR_TYPE(std::int32_t, N);  \
+    TILED_RENDERER_VECTOR_TYPE(std::uint32_t, N); \
+    TILED_RENDERER_VECTOR_TYPE(std::int64_t, N);  \
+    TILED_RENDERER_VECTOR_TYPE(std::uint64_t, N); \
+    TILED_RENDERER_VECTOR_TYPE(float, N);         \
+    TILED_RENDERER_VECTOR_TYPE(double, N)
+TILED_RENDERER_VECTOR_TYPES(1 << 0);
+TILED_RENDERER_VECTOR_TYPES(1 << 1);
+TILED_RENDERER_VECTOR_TYPES(1 << 2);
+TILED_RENDERER_VECTOR_TYPES(1 << 3);
+TILED_RENDERER_VECTOR_TYPES(1 << 4);
+TILED_RENDERER_VECTOR_TYPES(1 << 5);
+TILED_RENDERER_VECTOR_TYPES(1 << 6);
+TILED_RENDERER_VECTOR_TYPES(1 << 7);
+TILED_RENDERER_VECTOR_TYPES(1 << 8);
+TILED_RENDERER_VECTOR_TYPES(1 << 9);
+TILED_RENDERER_VECTOR_TYPES(1 << 10);
+#undef TILED_RENDERER_VECTOR_TYPES
+#undef TILED_RENDERER_VECTOR_TYPE
 
-TILED_RENDERER_VALUE_LIST_CAST(float, double, __m128, __m128d, 2, _mm_cvtpd_ps)
-TILED_RENDERER_VALUE_LIST_CAST(double, float, __m128d, __m128, 2, _mm_cvtps_pd)
-TILED_RENDERER_VALUE_LIST_CAST(std::int32_t, double, __m128i, __m128d, 2, _mm_cvttpd_epi32)
-TILED_RENDERER_VALUE_LIST_CAST(double, std::int32_t, __m128d, __m128i, 2, _mm_cvtepi32_pd)
+template <std::size_t BitCount, std::size_t N>
+struct BuiltinVector<BoolByBitWidth<BitCount>, N> final
+{
+    typedef typename BuiltinVector<typename BoolByBitWidth<BitCount>::underlyingType, N>::type type;
+};
 
-TILED_RENDERER_VALUE_LIST_CAST(std::int32_t, float, __m128i, __m128, 4, _mm_cvttps_epi32)
-TILED_RENDERER_VALUE_LIST_CAST(float, std::int32_t, __m128, __m128i, 4, _mm_cvtepi32_ps)
+#define TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(T)                                               \
+    template <typename SourceType, std::size_t ElementCount>                                       \
+    struct ValueListCast<T, SourceType, ElementCount> final                                        \
+    {                                                                                              \
+        static void run(ValueList<T, ElementCount> &retval,                                        \
+                        const ValueList<SourceType, ElementCount> &value) noexcept                 \
+        {                                                                                          \
+            typedef typename BuiltinVector<T, ElementCount>::type DestVector;                      \
+            typedef typename BuiltinVector<SourceType, ElementCount>::type SourceVector;           \
+            union                                                                                  \
+            {                                                                                      \
+                DestVector vector;                                                                 \
+                ValueList<T, ElementCount> valueList;                                              \
+            } dest{};                                                                              \
+            union                                                                                  \
+            {                                                                                      \
+                SourceVector vector;                                                               \
+                ValueList<SourceType, ElementCount> valueList;                                     \
+            } src{};                                                                               \
+            src.valueList = value;                                                                 \
+            dest.vector = __builtin_convertvector(src.vector, DestVector);                         \
+            retval = dest.valueList;                                                               \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListNeg<T, ElementCount> final                                                     \
+    {                                                                                              \
+        static void run(ValueList<T, ElementCount> &retval,                                        \
+                        const ValueList<T, ElementCount> &value) noexcept                          \
+        {                                                                                          \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type vector;                              \
+                ValueList<T, ElementCount> valueList{};                                            \
+            };                                                                                     \
+            valueList = value;                                                                     \
+            vector = -vector;                                                                      \
+            retval = valueList;                                                                    \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListAdd<T, ElementCount> final                                                     \
+    {                                                                                              \
+        static void run(ValueList<T, ElementCount> &retval,                                        \
+                        const ValueList<T, ElementCount> &l,                                       \
+                        const ValueList<T, ElementCount> &r) noexcept                              \
+        {                                                                                          \
+            union U                                                                                \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type vector;                              \
+                ValueList<T, ElementCount> valueList;                                              \
+            };                                                                                     \
+            U lValue{};                                                                            \
+            U rValue{};                                                                            \
+            lValue.valueList = l;                                                                  \
+            rValue.valueList = r;                                                                  \
+            lValue.vector = lValue.vector + rValue.vector;                                         \
+            retval = lValue.valueList;                                                             \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListSub<T, ElementCount> final                                                     \
+    {                                                                                              \
+        static void run(ValueList<T, ElementCount> &retval,                                        \
+                        const ValueList<T, ElementCount> &l,                                       \
+                        const ValueList<T, ElementCount> &r) noexcept                              \
+        {                                                                                          \
+            union U                                                                                \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type vector;                              \
+                ValueList<T, ElementCount> valueList;                                              \
+            };                                                                                     \
+            U lValue{};                                                                            \
+            U rValue{};                                                                            \
+            lValue.valueList = l;                                                                  \
+            rValue.valueList = r;                                                                  \
+            lValue.vector = lValue.vector - rValue.vector;                                         \
+            retval = lValue.valueList;                                                             \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListDiv<T, ElementCount> final                                                     \
+    {                                                                                              \
+        static void run(ValueList<T, ElementCount> &retval,                                        \
+                        const ValueList<T, ElementCount> &l,                                       \
+                        const ValueList<T, ElementCount> &r) noexcept                              \
+        {                                                                                          \
+            union U                                                                                \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type vector;                              \
+                ValueList<T, ElementCount> valueList;                                              \
+            };                                                                                     \
+            U lValue{};                                                                            \
+            U rValue{};                                                                            \
+            lValue.valueList = l;                                                                  \
+            rValue.valueList = r;                                                                  \
+            lValue.vector = lValue.vector / rValue.vector;                                         \
+            retval = lValue.valueList;                                                             \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListRem<T, ElementCount> final                                                     \
+    {                                                                                              \
+        static void run(ValueList<T, ElementCount> &retval,                                        \
+                        const ValueList<T, ElementCount> &l,                                       \
+                        const ValueList<T, ElementCount> &r) noexcept                              \
+        {                                                                                          \
+            union U                                                                                \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type vector;                              \
+                ValueList<T, ElementCount> valueList;                                              \
+            };                                                                                     \
+            U lValue{};                                                                            \
+            U rValue{};                                                                            \
+            lValue.valueList = l;                                                                  \
+            rValue.valueList = r;                                                                  \
+            lValue.vector = lValue.vector % rValue.vector;                                         \
+            retval = lValue.valueList;                                                             \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListMul<T, ElementCount> final                                                     \
+    {                                                                                              \
+        static void run(ValueList<T, ElementCount> &retval,                                        \
+                        const ValueList<T, ElementCount> &l,                                       \
+                        const ValueList<T, ElementCount> &r) noexcept                              \
+        {                                                                                          \
+            union U                                                                                \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type vector;                              \
+                ValueList<T, ElementCount> valueList;                                              \
+            };                                                                                     \
+            U lValue{};                                                                            \
+            U rValue{};                                                                            \
+            lValue.valueList = l;                                                                  \
+            rValue.valueList = r;                                                                  \
+            lValue.vector = lValue.vector * rValue.vector;                                         \
+            retval = lValue.valueList;                                                             \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListLT<T, ElementCount> final                                                      \
+    {                                                                                              \
+        static void run(ValueList<typename BoolForType<T>::type, ElementCount> &retval,            \
+                        const ValueList<T, ElementCount> &l,                                       \
+                        const ValueList<T, ElementCount> &r) noexcept                              \
+        {                                                                                          \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type lVector;                             \
+                ValueList<T, ElementCount> lValueList{};                                           \
+            };                                                                                     \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type rVector;                             \
+                ValueList<T, ElementCount> rValueList{};                                           \
+            };                                                                                     \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<typename BoolForType<T>::type, ElementCount>::type dVector; \
+                ValueList<BoolForType<T>::type, ElementCount> dValueList{};                        \
+            };                                                                                     \
+            lValueList = l;                                                                        \
+            rValueList = r;                                                                        \
+            dVector = lVector < rVector;                                                           \
+            retval = dValueList;                                                                   \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListLE<T, ElementCount> final                                                      \
+    {                                                                                              \
+        static void run(ValueList<typename BoolForType<T>::type, ElementCount> &retval,            \
+                        const ValueList<T, ElementCount> &l,                                       \
+                        const ValueList<T, ElementCount> &r) noexcept                              \
+        {                                                                                          \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type lVector;                             \
+                ValueList<T, ElementCount> lValueList{};                                           \
+            };                                                                                     \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type rVector;                             \
+                ValueList<T, ElementCount> rValueList{};                                           \
+            };                                                                                     \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<typename BoolForType<T>::type, ElementCount>::type dVector; \
+                ValueList<BoolForType<T>::type, ElementCount> dValueList{};                        \
+            };                                                                                     \
+            lValueList = l;                                                                        \
+            rValueList = r;                                                                        \
+            dVector = lVector <= rVector;                                                          \
+            retval = dValueList;                                                                   \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListEq<T, ElementCount> final                                                      \
+    {                                                                                              \
+        static void run(ValueList<typename BoolForType<T>::type, ElementCount> &retval,            \
+                        const ValueList<T, ElementCount> &l,                                       \
+                        const ValueList<T, ElementCount> &r) noexcept                              \
+        {                                                                                          \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type lVector;                             \
+                ValueList<T, ElementCount> lValueList{};                                           \
+            };                                                                                     \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type rVector;                             \
+                ValueList<T, ElementCount> rValueList{};                                           \
+            };                                                                                     \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<typename BoolForType<T>::type, ElementCount>::type dVector; \
+                ValueList<BoolForType<T>::type, ElementCount> dValueList{};                        \
+            };                                                                                     \
+            lValueList = l;                                                                        \
+            rValueList = r;                                                                        \
+            dVector = lVector == rVector;                                                          \
+            retval = dValueList;                                                                   \
+        }                                                                                          \
+    };                                                                                             \
+    template <std::size_t ElementCount>                                                            \
+    struct ValueListNE<T, ElementCount> final                                                      \
+    {                                                                                              \
+        static void run(ValueList<typename BoolForType<T>::type, ElementCount> &retval,            \
+                        const ValueList<T, ElementCount> &l,                                       \
+                        const ValueList<T, ElementCount> &r) noexcept                              \
+        {                                                                                          \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type lVector;                             \
+                ValueList<T, ElementCount> lValueList{};                                           \
+            };                                                                                     \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<T, ElementCount>::type rVector;                             \
+                ValueList<T, ElementCount> rValueList{};                                           \
+            };                                                                                     \
+            union                                                                                  \
+            {                                                                                      \
+                typename BuiltinVector<typename BoolForType<T>::type, ElementCount>::type dVector; \
+                ValueList<BoolForType<T>::type, ElementCount> dValueList{};                        \
+            };                                                                                     \
+            lValueList = l;                                                                        \
+            rValueList = r;                                                                        \
+            dVector = lVector != rVector;                                                          \
+            retval = dValueList;                                                                   \
+        }                                                                                          \
+    };
 
-#undef TILED_RENDERER_VALUE_LIST_CAST
+#define TILED_RENDERER_VALUE_LIST_INT_OPERATIONS(T)                   \
+    template <std::size_t ElementCount>                               \
+    struct ValueListAnd<T, ElementCount> final                        \
+    {                                                                 \
+        static void run(ValueList<T, ElementCount> &retval,           \
+                        const ValueList<T, ElementCount> &l,          \
+                        const ValueList<T, ElementCount> &r) noexcept \
+        {                                                             \
+            union U                                                   \
+            {                                                         \
+                typename BuiltinVector<T, ElementCount>::type vector; \
+                ValueList<T, ElementCount> valueList;                 \
+            };                                                        \
+            U lValue{};                                               \
+            U rValue{};                                               \
+            lValue.valueList = l;                                     \
+            rValue.valueList = r;                                     \
+            lValue.vector = lValue.vector & rValue.vector;            \
+            retval = lValue.valueList;                                \
+        }                                                             \
+    };                                                                \
+    template <std::size_t ElementCount>                               \
+    struct ValueListOr<T, ElementCount> final                         \
+    {                                                                 \
+        static void run(ValueList<T, ElementCount> &retval,           \
+                        const ValueList<T, ElementCount> &l,          \
+                        const ValueList<T, ElementCount> &r) noexcept \
+        {                                                             \
+            union U                                                   \
+            {                                                         \
+                typename BuiltinVector<T, ElementCount>::type vector; \
+                ValueList<T, ElementCount> valueList;                 \
+            };                                                        \
+            U lValue{};                                               \
+            U rValue{};                                               \
+            lValue.valueList = l;                                     \
+            rValue.valueList = r;                                     \
+            lValue.vector = lValue.vector | rValue.vector;            \
+            retval = lValue.valueList;                                \
+        }                                                             \
+    };                                                                \
+    template <std::size_t ElementCount>                               \
+    struct ValueListXor<T, ElementCount> final                        \
+    {                                                                 \
+        static void run(ValueList<T, ElementCount> &retval,           \
+                        const ValueList<T, ElementCount> &l,          \
+                        const ValueList<T, ElementCount> &r) noexcept \
+        {                                                             \
+            union U                                                   \
+            {                                                         \
+                typename BuiltinVector<T, ElementCount>::type vector; \
+                ValueList<T, ElementCount> valueList;                 \
+            };                                                        \
+            U lValue{};                                               \
+            U rValue{};                                               \
+            lValue.valueList = l;                                     \
+            rValue.valueList = r;                                     \
+            lValue.vector = lValue.vector ^ rValue.vector;            \
+            retval = lValue.valueList;                                \
+        }                                                             \
+    };
 
-#define TILED_RENDERER_VALUE_LIST_BITWISE_128(Type, ElementCount)        \
-    namespace detail                                                     \
-    {                                                                    \
-    template <>                                                          \
-    struct ValueListAnd<Type, ElementCount> final                        \
-    {                                                                    \
-        static void run(ValueList<Type, ElementCount> &retval,           \
-                        const ValueList<Type, ElementCount> &l,          \
-                        const ValueList<Type, ElementCount> &r) noexcept \
-        {                                                                \
-            union U                                                      \
-            {                                                            \
-                __m128 vector;                                           \
-                ValueList<Type, ElementCount> valueList;                 \
-            };                                                           \
-            U lValue{};                                                  \
-            U rValue{};                                                  \
-            lValue.valueList = l;                                        \
-            rValue.valueList = r;                                        \
-            lValue.vector = _mm_and_ps(lValue.vector, rValue.vector);    \
-            retval = lValue.valueList;                                   \
-        }                                                                \
-    };                                                                   \
-    template <>                                                          \
-    struct ValueListOr<Type, ElementCount> final                         \
-    {                                                                    \
-        static void run(ValueList<Type, ElementCount> &retval,           \
-                        const ValueList<Type, ElementCount> &l,          \
-                        const ValueList<Type, ElementCount> &r) noexcept \
-        {                                                                \
-            union U                                                      \
-            {                                                            \
-                __m128 vector;                                           \
-                ValueList<Type, ElementCount> valueList;                 \
-            };                                                           \
-            U lValue{};                                                  \
-            U rValue{};                                                  \
-            lValue.valueList = l;                                        \
-            rValue.valueList = r;                                        \
-            lValue.vector = _mm_or_ps(lValue.vector, rValue.vector);     \
-            retval = lValue.valueList;                                   \
-        }                                                                \
-    };                                                                   \
-    template <>                                                          \
-    struct ValueListXor<Type, ElementCount> final                        \
-    {                                                                    \
-        static void run(ValueList<Type, ElementCount> &retval,           \
-                        const ValueList<Type, ElementCount> &l,          \
-                        const ValueList<Type, ElementCount> &r) noexcept \
-        {                                                                \
-            union U                                                      \
-            {                                                            \
-                __m128 vector;                                           \
-                ValueList<Type, ElementCount> valueList;                 \
-            };                                                           \
-            U lValue{};                                                  \
-            U rValue{};                                                  \
-            lValue.valueList = l;                                        \
-            rValue.valueList = r;                                        \
-            lValue.vector = _mm_xor_ps(lValue.vector, rValue.vector);    \
-            retval = lValue.valueList;                                   \
-        }                                                                \
-    };                                                                   \
-    }
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(std::int8_t)
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(std::uint8_t)
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(std::int16_t)
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(std::uint16_t)
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(std::int32_t)
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(std::uint32_t)
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(std::int64_t)
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(std::uint64_t)
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(float)
+TILED_RENDERER_VALUE_LIST_BASE_OPERATIONS(double)
 
-TILED_RENDERER_VALUE_LIST_BITWISE_128(std::uint8_t, 16)
-TILED_RENDERER_VALUE_LIST_BITWISE_128(std::int8_t, 16)
-TILED_RENDERER_VALUE_LIST_BITWISE_128(std::uint16_t, 8)
-TILED_RENDERER_VALUE_LIST_BITWISE_128(std::int16_t, 8)
-TILED_RENDERER_VALUE_LIST_BITWISE_128(std::uint32_t, 4)
-TILED_RENDERER_VALUE_LIST_BITWISE_128(std::int32_t, 4)
-TILED_RENDERER_VALUE_LIST_BITWISE_128(std::uint64_t, 2)
-TILED_RENDERER_VALUE_LIST_BITWISE_128(std::int64_t, 2)
+TILED_RENDERER_VALUE_LIST_INT_OPERATIONS(std::int8_t)
+TILED_RENDERER_VALUE_LIST_INT_OPERATIONS(std::uint8_t)
+TILED_RENDERER_VALUE_LIST_INT_OPERATIONS(std::int16_t)
+TILED_RENDERER_VALUE_LIST_INT_OPERATIONS(std::uint16_t)
+TILED_RENDERER_VALUE_LIST_INT_OPERATIONS(std::int32_t)
+TILED_RENDERER_VALUE_LIST_INT_OPERATIONS(std::uint32_t)
+TILED_RENDERER_VALUE_LIST_INT_OPERATIONS(std::int64_t)
+TILED_RENDERER_VALUE_LIST_INT_OPERATIONS(std::uint64_t)
 
-#undef TILED_RENDERER_VALUE_LIST_BITWISE_128
-
-#define TILED_RENDERER_VALUE_LIST_SIGNLESS(Type, ElementCount, AddOp, SubOp) \
-    namespace detail                                                         \
-    {                                                                        \
-    template <>                                                              \
-    struct ValueListAdd<Type, ElementCount> final                            \
-    {                                                                        \
-        static void run(ValueList<Type, ElementCount> &retval,               \
-                        const ValueList<Type, ElementCount> &l,              \
-                        const ValueList<Type, ElementCount> &r) noexcept     \
-        {                                                                    \
-            union U                                                          \
-            {                                                                \
-                __m128i vector;                                              \
-                ValueList<Type, ElementCount> valueList;                     \
-            };                                                               \
-            U lValue{};                                                      \
-            U rValue{};                                                      \
-            lValue.valueList = l;                                            \
-            rValue.valueList = r;                                            \
-            lValue.vector = AddOp(lValue.vector, rValue.vector);             \
-            retval = lValue.valueList;                                       \
-        }                                                                    \
-    };                                                                       \
-    template <>                                                              \
-    struct ValueListSub<Type, ElementCount> final                            \
-    {                                                                        \
-        static void run(ValueList<Type, ElementCount> &retval,               \
-                        const ValueList<Type, ElementCount> &l,              \
-                        const ValueList<Type, ElementCount> &r) noexcept     \
-        {                                                                    \
-            union U                                                          \
-            {                                                                \
-                __m128i vector;                                              \
-                ValueList<Type, ElementCount> valueList;                     \
-            };                                                               \
-            U lValue{};                                                      \
-            U rValue{};                                                      \
-            lValue.valueList = l;                                            \
-            rValue.valueList = r;                                            \
-            lValue.vector = SubOp(lValue.vector, rValue.vector);             \
-            retval = lValue.valueList;                                       \
-        }                                                                    \
-    };                                                                       \
-    }
-
-TILED_RENDERER_VALUE_LIST_SIGNLESS(std::uint8_t, 16, _mm_add_epi8, _mm_sub_epi8)
-TILED_RENDERER_VALUE_LIST_SIGNLESS(std::int8_t, 16, _mm_add_epi8, _mm_sub_epi8)
-TILED_RENDERER_VALUE_LIST_SIGNLESS(std::uint16_t, 8, _mm_add_epi16, _mm_sub_epi16)
-TILED_RENDERER_VALUE_LIST_SIGNLESS(std::int16_t, 8, _mm_add_epi16, _mm_sub_epi16)
-TILED_RENDERER_VALUE_LIST_SIGNLESS(std::uint32_t, 4, _mm_add_epi32, _mm_sub_epi32)
-TILED_RENDERER_VALUE_LIST_SIGNLESS(std::int32_t, 4, _mm_add_epi32, _mm_sub_epi32)
-TILED_RENDERER_VALUE_LIST_SIGNLESS(std::uint64_t, 2, _mm_add_epi64, _mm_sub_epi64)
-TILED_RENDERER_VALUE_LIST_SIGNLESS(std::int64_t, 2, _mm_add_epi64, _mm_sub_epi64)
-
-#undef TILED_RENDERER_VALUE_LIST_SIGNLESS
-
-#define TILED_RENDERER_VALUE_LIST_FLOATING_POINT(                        \
-    Type, ElementCount, VectorType, AddOp, SubOp, MulOp, DivOp)          \
-    namespace detail                                                     \
-    {                                                                    \
-    template <>                                                          \
-    struct ValueListAdd<Type, ElementCount> final                        \
-    {                                                                    \
-        static void run(ValueList<Type, ElementCount> &retval,           \
-                        const ValueList<Type, ElementCount> &l,          \
-                        const ValueList<Type, ElementCount> &r) noexcept \
-        {                                                                \
-            union                                                        \
-            {                                                            \
-                VectorType lVector;                                      \
-                ValueList<Type, ElementCount> lValueList{};              \
-            };                                                           \
-            union                                                        \
-            {                                                            \
-                VectorType rVector;                                      \
-                ValueList<Type, ElementCount> rValueList{};              \
-            };                                                           \
-            lValueList = l;                                              \
-            rValueList = r;                                              \
-            lVector = AddOp(lVector, rVector);                           \
-            retval = lValueList;                                         \
-        }                                                                \
-    };                                                                   \
-    template <>                                                          \
-    struct ValueListSub<Type, ElementCount> final                        \
-    {                                                                    \
-        static void run(ValueList<Type, ElementCount> &retval,           \
-                        const ValueList<Type, ElementCount> &l,          \
-                        const ValueList<Type, ElementCount> &r) noexcept \
-        {                                                                \
-            union                                                        \
-            {                                                            \
-                VectorType lVector;                                      \
-                ValueList<Type, ElementCount> lValueList{};              \
-            };                                                           \
-            union                                                        \
-            {                                                            \
-                VectorType rVector;                                      \
-                ValueList<Type, ElementCount> rValueList{};              \
-            };                                                           \
-            lValueList = l;                                              \
-            rValueList = r;                                              \
-            lVector = SubOp(lVector, rVector);                           \
-            retval = lValueList;                                         \
-        }                                                                \
-    };                                                                   \
-    template <>                                                          \
-    struct ValueListMul<Type, ElementCount> final                        \
-    {                                                                    \
-        static void run(ValueList<Type, ElementCount> &retval,           \
-                        const ValueList<Type, ElementCount> &l,          \
-                        const ValueList<Type, ElementCount> &r) noexcept \
-        {                                                                \
-            union                                                        \
-            {                                                            \
-                VectorType lVector;                                      \
-                ValueList<Type, ElementCount> lValueList{};              \
-            };                                                           \
-            union                                                        \
-            {                                                            \
-                VectorType rVector;                                      \
-                ValueList<Type, ElementCount> rValueList{};              \
-            };                                                           \
-            lValueList = l;                                              \
-            rValueList = r;                                              \
-            lVector = MulOp(lVector, rVector);                           \
-            retval = lValueList;                                         \
-        }                                                                \
-    };                                                                   \
-    template <>                                                          \
-    struct ValueListDiv<Type, ElementCount> final                        \
-    {                                                                    \
-        static void run(ValueList<Type, ElementCount> &retval,           \
-                        const ValueList<Type, ElementCount> &l,          \
-                        const ValueList<Type, ElementCount> &r) noexcept \
-        {                                                                \
-            union                                                        \
-            {                                                            \
-                VectorType lVector;                                      \
-                ValueList<Type, ElementCount> lValueList{};              \
-            };                                                           \
-            union                                                        \
-            {                                                            \
-                VectorType rVector;                                      \
-                ValueList<Type, ElementCount> rValueList{};              \
-            };                                                           \
-            lValueList = l;                                              \
-            rValueList = r;                                              \
-            lVector = DivOp(lVector, rVector);                           \
-            retval = lValueList;                                         \
-        }                                                                \
-    };                                                                   \
-    }
-
-TILED_RENDERER_VALUE_LIST_FLOATING_POINT(
-    float, 4, __m128, _mm_add_ps, _mm_sub_ps, _mm_mul_ps, _mm_div_ps)
-TILED_RENDERER_VALUE_LIST_FLOATING_POINT(
-    double, 2, __m128d, _mm_add_pd, _mm_sub_pd, _mm_mul_pd, _mm_div_pd)
-
-#undef TILED_RENDERER_VALUE_LIST_FLOATING_POINT
-
-#define TILED_RENDERER_VALUE_LIST_COMPARE(                                      \
-    Type, BType, ElementCount, VectorType, BVectorType, LTOp, LEOp, EqOp, NEOp) \
-    namespace detail                                                            \
-    {                                                                           \
-    template <>                                                                 \
-    struct ValueListLT<Type, ElementCount> final                                \
-    {                                                                           \
-        static void run(ValueList<BType, ElementCount> &retval,                 \
-                        const ValueList<Type, ElementCount> &l,                 \
-                        const ValueList<Type, ElementCount> &r) noexcept        \
-        {                                                                       \
-            union                                                               \
-            {                                                                   \
-                VectorType lVector;                                             \
-                ValueList<Type, ElementCount> lValueList{};                     \
-            };                                                                  \
-            union                                                               \
-            {                                                                   \
-                VectorType rVector;                                             \
-                ValueList<Type, ElementCount> rValueList{};                     \
-            };                                                                  \
-            union                                                               \
-            {                                                                   \
-                BVectorType dVector;                                            \
-                ValueList<BType, ElementCount> dValueList{};                    \
-            };                                                                  \
-            lValueList = l;                                                     \
-            rValueList = r;                                                     \
-            dVector = LTOp(lVector, rVector);                                   \
-            retval = dValueList;                                                \
-        }                                                                       \
-    };                                                                          \
-    template <>                                                                 \
-    struct ValueListLE<Type, ElementCount> final                                \
-    {                                                                           \
-        static void run(ValueList<BType, ElementCount> &retval,                 \
-                        const ValueList<Type, ElementCount> &l,                 \
-                        const ValueList<Type, ElementCount> &r) noexcept        \
-        {                                                                       \
-            union                                                               \
-            {                                                                   \
-                VectorType lVector;                                             \
-                ValueList<Type, ElementCount> lValueList{};                     \
-            };                                                                  \
-            union                                                               \
-            {                                                                   \
-                VectorType rVector;                                             \
-                ValueList<Type, ElementCount> rValueList{};                     \
-            };                                                                  \
-            union                                                               \
-            {                                                                   \
-                BVectorType dVector;                                            \
-                ValueList<BType, ElementCount> dValueList{};                    \
-            };                                                                  \
-            lValueList = l;                                                     \
-            rValueList = r;                                                     \
-            dVector = LEOp(lVector, rVector);                                   \
-            retval = dValueList;                                                \
-        }                                                                       \
-    };                                                                          \
-    template <>                                                                 \
-    struct ValueListEq<Type, ElementCount> final                                \
-    {                                                                           \
-        static void run(ValueList<BType, ElementCount> &retval,                 \
-                        const ValueList<Type, ElementCount> &l,                 \
-                        const ValueList<Type, ElementCount> &r) noexcept        \
-        {                                                                       \
-            union                                                               \
-            {                                                                   \
-                VectorType lVector;                                             \
-                ValueList<Type, ElementCount> lValueList{};                     \
-            };                                                                  \
-            union                                                               \
-            {                                                                   \
-                VectorType rVector;                                             \
-                ValueList<Type, ElementCount> rValueList{};                     \
-            };                                                                  \
-            union                                                               \
-            {                                                                   \
-                BVectorType dVector;                                            \
-                ValueList<BType, ElementCount> dValueList{};                    \
-            };                                                                  \
-            lValueList = l;                                                     \
-            rValueList = r;                                                     \
-            dVector = EqOp(lVector, rVector);                                   \
-            retval = dValueList;                                                \
-        }                                                                       \
-    };                                                                          \
-    template <>                                                                 \
-    struct ValueListNE<Type, ElementCount> final                                \
-    {                                                                           \
-        static void run(ValueList<BType, ElementCount> &retval,                 \
-                        const ValueList<Type, ElementCount> &l,                 \
-                        const ValueList<Type, ElementCount> &r) noexcept        \
-        {                                                                       \
-            union                                                               \
-            {                                                                   \
-                VectorType lVector;                                             \
-                ValueList<Type, ElementCount> lValueList{};                     \
-            };                                                                  \
-            union                                                               \
-            {                                                                   \
-                VectorType rVector;                                             \
-                ValueList<Type, ElementCount> rValueList{};                     \
-            };                                                                  \
-            union                                                               \
-            {                                                                   \
-                BVectorType dVector;                                            \
-                ValueList<BType, ElementCount> dValueList{};                    \
-            };                                                                  \
-            lValueList = l;                                                     \
-            rValueList = r;                                                     \
-            dVector = NEOp(lVector, rVector);                                   \
-            retval = dValueList;                                                \
-        }                                                                       \
-    };                                                                          \
-    }
-
-TILED_RENDERER_VALUE_LIST_COMPARE(
-    float, Bool32, 4, __m128, __m128, _mm_cmplt_ps, _mm_cmple_ps, _mm_cmpeq_ps, _mm_cmpneq_ps)
-TILED_RENDERER_VALUE_LIST_COMPARE(
-    double, Bool64, 2, __m128d, __m128d, _mm_cmplt_pd, _mm_cmple_pd, _mm_cmpeq_pd, _mm_cmpneq_pd)
-
-#undef TILED_RENDERER_VALUE_LIST_COMPARE
+#undef TILED_RENDERER_VALUE_LIST_OPERATIONS
+#undef TILED_RENDERER_VALUE_LIST_INT_OPERATIONS
+}
 }
 #endif
 

@@ -27,11 +27,12 @@
 #include <cstdint>
 #include <cassert>
 #include <string>
+#include <chrono>
 #include "SDL.h"
 
 using namespace tiled_renderer;
 
-constexpr std::size_t Log2ValueListSize = 2;
+constexpr std::size_t Log2ValueListSize = 3;
 constexpr std::size_t ValueListSize = static_cast<std::size_t>(1) << Log2ValueListSize;
 typedef ValueList<float, ValueListSize> FloatList;
 typedef ValueList<std::int32_t, ValueListSize> I32List;
@@ -52,10 +53,12 @@ template <>
 struct ChunkLevel<0> final
 {
     static_assert(Log2ValueListSize > 0, "");
-    static constexpr std::size_t width = static_cast<std::size_t>(1) << (Log2ValueListSize + 1) / 2;
-    static constexpr std::size_t height = static_cast<std::size_t>(1) << (Log2ValueListSize) / 2;
-    static constexpr std::size_t totalWidth = width;
-    static constexpr std::size_t totalHeight = height;
+    static constexpr std::size_t subchunkWidth = static_cast<std::size_t>(1)
+                                                 << (Log2ValueListSize + 1) / 2;
+    static constexpr std::size_t subchunkHeight = static_cast<std::size_t>(1)
+                                                  << (Log2ValueListSize) / 2;
+    static constexpr std::size_t totalWidth = subchunkWidth;
+    static constexpr std::size_t totalHeight = subchunkHeight;
     static constexpr std::size_t xStepSize = 1;
     static constexpr std::size_t yStepSize = 1;
     static I32List getXPositions() noexcept
@@ -63,7 +66,7 @@ struct ChunkLevel<0> final
         I32List retval{};
         for(std::size_t i = 0; i < ValueListSize; i++)
         {
-            retval[i] = i % width;
+            retval[i] = i % subchunkWidth;
         }
         return retval;
     }
@@ -72,7 +75,7 @@ struct ChunkLevel<0> final
         I32List retval{};
         for(std::size_t i = 0; i < ValueListSize; i++)
         {
-            retval[i] = i / width;
+            retval[i] = i / subchunkWidth;
         }
         return retval;
     }
@@ -81,10 +84,10 @@ struct ChunkLevel<0> final
 template <std::size_t Level>
 struct ChunkLevel final
 {
-    static constexpr std::size_t width = ChunkLevel<Level - 1>::height;
-    static constexpr std::size_t height = ChunkLevel<Level - 1>::width;
-    static constexpr std::size_t totalWidth = ChunkLevel<Level - 1>::totalWidth * width;
-    static constexpr std::size_t totalHeight = ChunkLevel<Level - 1>::totalHeight * height;
+    static constexpr std::size_t subchunkWidth = ChunkLevel<Level - 1>::subchunkHeight;
+    static constexpr std::size_t subchunkHeight = ChunkLevel<Level - 1>::subchunkWidth;
+    static constexpr std::size_t totalWidth = ChunkLevel<Level - 1>::totalWidth * subchunkWidth;
+    static constexpr std::size_t totalHeight = ChunkLevel<Level - 1>::totalHeight * subchunkHeight;
     static constexpr std::size_t xStepSize = ChunkLevel<Level - 1>::totalWidth;
     static constexpr std::size_t yStepSize = ChunkLevel<Level - 1>::totalHeight;
     static I32List getXPositions() noexcept
@@ -92,7 +95,7 @@ struct ChunkLevel final
         I32List retval{};
         for(std::size_t i = 0; i < ValueListSize; i++)
         {
-            retval[i] = (i % width) * xStepSize;
+            retval[i] = (i % subchunkWidth) * xStepSize;
         }
         return retval;
     }
@@ -101,7 +104,7 @@ struct ChunkLevel final
         I32List retval{};
         for(std::size_t i = 0; i < ValueListSize; i++)
         {
-            retval[i] = (i / width) * yStepSize;
+            retval[i] = (i / subchunkWidth) * yStepSize;
         }
         return retval;
     }
@@ -159,7 +162,7 @@ struct MakeLevelList final
     typedef typename MakeLevelList<Level - 1, Level, Levels...>::type type;
 };
 
-constexpr std::size_t MaxTriangleLevel = 2;
+constexpr std::size_t MaxTriangleLevel = 4;
 constexpr std::size_t EdgeEquationFractionalBits = 18;
 
 struct TriangleRenderState final
@@ -199,6 +202,10 @@ struct TriangleRenderState final
         I32List edgeEquationXSteps[3];
         I32List edgeEquationYSteps[3];
         I32List edgeEquationConstants[3];
+        I32List trivialRejectX[3];
+        I32List trivialRejectY[3];
+        I32List trivialAcceptX[3];
+        I32List trivialAcceptY[3];
     };
     ColorImage &colorImage;
     DepthImage &depthImage;
@@ -214,26 +221,38 @@ struct TriangleRenderState final
     I32List edgeEquationYSteps[3];
     Bool32List trivialReject;
     Bool32List trivialAccepts[3];
+    const std::int32_t scissorX;
+    const std::int32_t scissorY;
+    const std::int32_t scissorWidth;
+    const std::int32_t scissorHeight;
     TriangleRenderState(ColorImage &colorImage,
                         DepthImage &depthImage,
                         Vector4FList triangleP1,
                         Vector4FList triangleP2,
                         Vector4FList triangleP3,
                         Colors drawColors,
-                        std::size_t triangleCount) noexcept : colorImage(colorImage),
-                                                              depthImage(depthImage),
-                                                              triangleP1(triangleP1),
-                                                              triangleP2(triangleP2),
-                                                              triangleP3(triangleP3),
-                                                              drawColors(drawColors),
-                                                              triangleCount(triangleCount),
-                                                              perLevelStates{},
-                                                              drawTriangleMask(true),
-                                                              edgeEquationConstants{},
-                                                              edgeEquationXSteps{},
-                                                              edgeEquationYSteps{},
-                                                              trivialReject(false),
-                                                              trivialAccepts{}
+                        std::size_t triangleCount,
+                        std::int32_t scissorX,
+                        std::int32_t scissorY,
+                        std::int32_t scissorWidth,
+                        std::int32_t scissorHeight) noexcept : colorImage(colorImage),
+                                                               depthImage(depthImage),
+                                                               triangleP1(triangleP1),
+                                                               triangleP2(triangleP2),
+                                                               triangleP3(triangleP3),
+                                                               drawColors(drawColors),
+                                                               triangleCount(triangleCount),
+                                                               perLevelStates{},
+                                                               drawTriangleMask(true),
+                                                               edgeEquationConstants{},
+                                                               edgeEquationXSteps{},
+                                                               edgeEquationYSteps{},
+                                                               trivialReject(false),
+                                                               trivialAccepts{},
+                                                               scissorX(scissorX),
+                                                               scissorY(scissorY),
+                                                               scissorWidth(scissorWidth),
+                                                               scissorHeight(scissorHeight)
     {
     }
     static Bool32List checkEdgeEquationList(const FloatList &constant,
@@ -241,6 +260,14 @@ struct TriangleRenderState final
                                             const FloatList &yStep,
                                             const FloatList &x,
                                             const FloatList &y) noexcept
+    {
+        return constant + xStep * x + yStep * y >= 0;
+    }
+    static Bool32List checkEdgeEquationList(const I32List &constant,
+                                            const I32List &xStep,
+                                            const I32List &yStep,
+                                            const I32List &x,
+                                            const I32List &y) noexcept
     {
         return constant + xStep * x + yStep * y >= 0;
     }
@@ -257,6 +284,26 @@ struct TriangleRenderState final
             perLevelState.edgeEquationConstants[i] =
                 I32List(edgeEquationConstants[i][triangleIndex])
                 + perLevelState.edgeEquationXSteps[i] + perLevelState.edgeEquationYSteps[i];
+            ValueList<Bool32, ValueListSize> compareResultX(edgeEquationXSteps[i][triangleIndex]
+                                                            > 0);
+            ValueList<Bool32, ValueListSize> compareResultY(edgeEquationYSteps[i][triangleIndex]
+                                                            > 0);
+            perLevelState.trivialRejectX[i] = select(
+                compareResultX,
+                ChunkLevel<Level>::getXPositions() + I32List(ChunkLevel<Level>::xStepSize - 1),
+                ChunkLevel<Level>::getXPositions());
+            perLevelState.trivialRejectY[i] = select(
+                compareResultY,
+                ChunkLevel<Level>::getYPositions() + I32List(ChunkLevel<Level>::yStepSize - 1),
+                ChunkLevel<Level>::getYPositions());
+            perLevelState.trivialAcceptX[i] = select(
+                compareResultX,
+                ChunkLevel<Level>::getXPositions(),
+                ChunkLevel<Level>::getXPositions() + I32List(ChunkLevel<Level>::xStepSize - 1));
+            perLevelState.trivialAcceptY[i] = select(
+                compareResultY,
+                ChunkLevel<Level>::getYPositions(),
+                ChunkLevel<Level>::getYPositions() + I32List(ChunkLevel<Level>::yStepSize - 1));
         }
         return 0;
     }
@@ -392,11 +439,28 @@ struct TriangleRenderState final
 template <std::size_t Level,
           bool needsEdgeEquation0,
           bool needsEdgeEquation1,
-          bool needsEdgeEquation2>
+          bool needsEdgeEquation2,
+          bool needsScissorNX,
+          bool needsScissorPX,
+          bool needsScissorNY,
+          bool needsScissorPY>
 struct RenderTriangleHelper;
 
-template <bool needsEdgeEquation0, bool needsEdgeEquation1, bool needsEdgeEquation2>
-struct RenderTriangleHelper<0, needsEdgeEquation0, needsEdgeEquation1, needsEdgeEquation2> final
+template <bool needsEdgeEquation0,
+          bool needsEdgeEquation1,
+          bool needsEdgeEquation2,
+          bool needsScissorNX,
+          bool needsScissorPX,
+          bool needsScissorNY,
+          bool needsScissorPY>
+struct RenderTriangleHelper<0,
+                            needsEdgeEquation0,
+                            needsEdgeEquation1,
+                            needsEdgeEquation2,
+                            needsScissorNX,
+                            needsScissorPX,
+                            needsScissorNY,
+                            needsScissorPY> final
 {
     static constexpr std::size_t Level = 0;
     static void run(const TriangleRenderState &renderState,
@@ -423,14 +487,22 @@ struct RenderTriangleHelper<0, needsEdgeEquation0, needsEdgeEquation1, needsEdge
                                      + yOrigin * renderState.edgeEquationYSteps[2][triangleIndex])
                                  + perLevelState.edgeEquationConstants[2]
                              >= I32List(0);
+        if(needsScissorNX)
+            passingPixels &= xPositions >= I32List(renderState.scissorX);
+        if(needsScissorNY)
+            passingPixels &= yPositions >= I32List(renderState.scissorY);
+        if(needsScissorPX)
+            passingPixels &= xPositions < I32List(renderState.scissorX + renderState.scissorWidth);
+        if(needsScissorPY)
+            passingPixels &= yPositions < I32List(renderState.scissorY + renderState.scissorHeight);
         for(std::size_t i = 0; i < ValueListSize; i++)
         {
             if(passingPixels[i])
             {
 #warning finish
                 auto previousColor =
-                    renderState.colorImage.getElement(xPositions[i], yPositions[i], 0);
-                renderState.colorImage.setElement(
+                    renderState.colorImage.getElementUnchecked(xPositions[i], yPositions[i], 0);
+                renderState.colorImage.setElementUnchecked(
                     xPositions[i], yPositions[i], 0, renderState.drawColors.colors[triangleIndex]);
             }
         }
@@ -440,14 +512,271 @@ struct RenderTriangleHelper<0, needsEdgeEquation0, needsEdgeEquation1, needsEdge
 template <std::size_t Level,
           bool needsEdgeEquation0,
           bool needsEdgeEquation1,
-          bool needsEdgeEquation2>
+          bool needsEdgeEquation2,
+          bool needsScissorNX,
+          bool needsScissorPX,
+          bool needsScissorNY,
+          bool needsScissorPY>
 struct RenderTriangleHelper final
 {
+    template <bool newNeedsEdgeEquation0, bool newNeedsEdgeEquation1, bool newNeedsEdgeEquation2>
+    static void runSubchunk(const TriangleRenderState &renderState,
+                            std::size_t triangleIndex,
+                            std::int32_t xOrigin,
+                            std::int32_t yOrigin,
+                            const TriangleRenderState::PerLevelState &perLevelState,
+                            const I32List &xPositions,
+                            const I32List &yPositions,
+                            std::size_t valueListIndex) noexcept
+    {
+#if 0
+#warning debug code enabled
+#else
+        RenderTriangleHelper<Level - 1,
+                             newNeedsEdgeEquation0,
+                             newNeedsEdgeEquation1,
+                             newNeedsEdgeEquation2,
+                             needsScissorNX,
+                             needsScissorPX,
+                             needsScissorNY,
+                             needsScissorPY>::run(renderState,
+                                                  triangleIndex,
+                                                  xPositions[valueListIndex],
+                                                  yPositions[valueListIndex]);
+#endif
+#if 0
+#warning debug code enabled
+        auto trivialReject0 = (I32List(xOrigin) + perLevelState.trivialRejectX[0])
+                                      * I32List(renderState.edgeEquationXSteps[0][triangleIndex])
+                                  + (I32List(yOrigin) + perLevelState.trivialRejectY[0])
+                                        * I32List(renderState.edgeEquationYSteps[0][triangleIndex])
+                                  + I32List(renderState.edgeEquationConstants[0][triangleIndex])
+                              >= I32List(0);
+        renderState.colorImage.setElement(
+            (I32List(xOrigin) + perLevelState.trivialRejectX[0])[valueListIndex],
+            (I32List(yOrigin) + perLevelState.trivialRejectY[0])[valueListIndex],
+            0,
+            Color(trivialReject0[valueListIndex] ? 0xFF : 0x80, 0, 0, 0xFF));
+        auto trivialReject1 = (I32List(xOrigin) + perLevelState.trivialRejectX[1])
+                                      * I32List(renderState.edgeEquationXSteps[1][triangleIndex])
+                                  + (I32List(yOrigin) + perLevelState.trivialRejectY[1])
+                                        * I32List(renderState.edgeEquationYSteps[1][triangleIndex])
+                                  + I32List(renderState.edgeEquationConstants[1][triangleIndex])
+                              >= I32List(0);
+        renderState.colorImage.setElement(
+            (I32List(xOrigin) + perLevelState.trivialRejectX[1])[valueListIndex],
+            (I32List(yOrigin) + perLevelState.trivialRejectY[1])[valueListIndex],
+            0,
+            Color(0, trivialReject1[valueListIndex] ? 0xFF : 0x80, 0, 0xFF));
+        auto trivialReject2 = (I32List(xOrigin) + perLevelState.trivialRejectX[2])
+                                      * I32List(renderState.edgeEquationXSteps[2][triangleIndex])
+                                  + (I32List(yOrigin) + perLevelState.trivialRejectY[2])
+                                        * I32List(renderState.edgeEquationYSteps[2][triangleIndex])
+                                  + I32List(renderState.edgeEquationConstants[2][triangleIndex])
+                              >= I32List(0);
+        renderState.colorImage.setElement(
+            (I32List(xOrigin) + perLevelState.trivialRejectX[2])[valueListIndex],
+            (I32List(yOrigin) + perLevelState.trivialRejectY[2])[valueListIndex],
+            0,
+            Color(0, 0, trivialReject2[valueListIndex] ? 0xFF : 0x80, 0xFF));
+#endif
+    }
     static void run(const TriangleRenderState &renderState,
                     std::size_t triangleIndex,
                     std::int32_t xOrigin,
                     std::int32_t yOrigin) noexcept
     {
+        auto &perLevelState = renderState.perLevelStates[triangleIndex][Level];
+        I32List xPositions = I32List(xOrigin) + ChunkLevel<Level>::getXPositions();
+        I32List yPositions = I32List(yOrigin) + ChunkLevel<Level>::getYPositions();
+        Bool32List passingSubchunks(true);
+        Bool32List triviallyAcceptedSubchunks[3] = {
+            Bool32List(true), Bool32List(true), Bool32List(true),
+        };
+        if(needsScissorNX)
+            passingSubchunks &=
+                xPositions > I32List(renderState.scissorX - ChunkLevel<Level>::xStepSize);
+        if(needsScissorNY)
+            passingSubchunks &=
+                yPositions > I32List(renderState.scissorY - ChunkLevel<Level>::yStepSize);
+        if(needsScissorPX)
+            passingSubchunks &=
+                xPositions < I32List(renderState.scissorX + renderState.scissorWidth);
+        if(needsScissorPY)
+            passingSubchunks &=
+                yPositions < I32List(renderState.scissorY + renderState.scissorHeight);
+        if(needsEdgeEquation0)
+        {
+            passingSubchunks &=
+                (I32List(xOrigin) + perLevelState.trivialRejectX[0])
+                        * I32List(renderState.edgeEquationXSteps[0][triangleIndex])
+                    + (I32List(yOrigin) + perLevelState.trivialRejectY[0])
+                          * I32List(renderState.edgeEquationYSteps[0][triangleIndex])
+                    + I32List(renderState.edgeEquationConstants[0][triangleIndex])
+                >= I32List(0);
+            triviallyAcceptedSubchunks[0] =
+                (I32List(xOrigin) + perLevelState.trivialAcceptX[0])
+                        * I32List(renderState.edgeEquationXSteps[0][triangleIndex])
+                    + (I32List(yOrigin) + perLevelState.trivialAcceptY[0])
+                          * I32List(renderState.edgeEquationYSteps[0][triangleIndex])
+                    + I32List(renderState.edgeEquationConstants[0][triangleIndex])
+                >= I32List(0);
+        }
+        if(needsEdgeEquation1)
+        {
+            passingSubchunks &=
+                (I32List(xOrigin) + perLevelState.trivialRejectX[1])
+                        * I32List(renderState.edgeEquationXSteps[1][triangleIndex])
+                    + (I32List(yOrigin) + perLevelState.trivialRejectY[1])
+                          * I32List(renderState.edgeEquationYSteps[1][triangleIndex])
+                    + I32List(renderState.edgeEquationConstants[1][triangleIndex])
+                >= I32List(0);
+            triviallyAcceptedSubchunks[1] =
+                (I32List(xOrigin) + perLevelState.trivialAcceptX[1])
+                        * I32List(renderState.edgeEquationXSteps[1][triangleIndex])
+                    + (I32List(yOrigin) + perLevelState.trivialAcceptY[1])
+                          * I32List(renderState.edgeEquationYSteps[1][triangleIndex])
+                    + I32List(renderState.edgeEquationConstants[1][triangleIndex])
+                >= I32List(0);
+        }
+        if(needsEdgeEquation2)
+        {
+            passingSubchunks &=
+                (I32List(xOrigin) + perLevelState.trivialRejectX[2])
+                        * I32List(renderState.edgeEquationXSteps[2][triangleIndex])
+                    + (I32List(yOrigin) + perLevelState.trivialRejectY[2])
+                          * I32List(renderState.edgeEquationYSteps[2][triangleIndex])
+                    + I32List(renderState.edgeEquationConstants[2][triangleIndex])
+                >= I32List(0);
+            triviallyAcceptedSubchunks[2] =
+                (I32List(xOrigin) + perLevelState.trivialAcceptX[2])
+                        * I32List(renderState.edgeEquationXSteps[2][triangleIndex])
+                    + (I32List(yOrigin) + perLevelState.trivialAcceptY[2])
+                          * I32List(renderState.edgeEquationYSteps[2][triangleIndex])
+                    + I32List(renderState.edgeEquationConstants[2][triangleIndex])
+                >= I32List(0);
+        }
+#if 0
+#warning debug code enabled
+        triviallyAcceptedSubchunks[0] = Bool32List(false);
+        triviallyAcceptedSubchunks[1] = Bool32List(false);
+        triviallyAcceptedSubchunks[2] = Bool32List(false);
+#endif
+        for(std::size_t i = 0; i < ValueListSize; i++)
+        {
+#if 0
+#warning debug code enabled
+#else
+            if(!passingSubchunks[i])
+                continue;
+#endif
+            if(!needsEdgeEquation0 | triviallyAcceptedSubchunks[0][i])
+            {
+                if(!needsEdgeEquation1 | triviallyAcceptedSubchunks[1][i])
+                {
+                    if(!needsEdgeEquation2 | triviallyAcceptedSubchunks[2][i])
+                    {
+                        runSubchunk<false, false, false>(renderState,
+                                                         triangleIndex,
+                                                         xOrigin,
+                                                         yOrigin,
+                                                         perLevelState,
+                                                         xPositions,
+                                                         yPositions,
+                                                         i);
+                    }
+                    else
+                    {
+                        runSubchunk<false, false, true>(renderState,
+                                                        triangleIndex,
+                                                        xOrigin,
+                                                        yOrigin,
+                                                        perLevelState,
+                                                        xPositions,
+                                                        yPositions,
+                                                        i);
+                    }
+                }
+                else
+                {
+                    if(!needsEdgeEquation2 | triviallyAcceptedSubchunks[2][i])
+                    {
+                        runSubchunk<false, true, false>(renderState,
+                                                        triangleIndex,
+                                                        xOrigin,
+                                                        yOrigin,
+                                                        perLevelState,
+                                                        xPositions,
+                                                        yPositions,
+                                                        i);
+                    }
+                    else
+                    {
+                        runSubchunk<false, true, true>(renderState,
+                                                       triangleIndex,
+                                                       xOrigin,
+                                                       yOrigin,
+                                                       perLevelState,
+                                                       xPositions,
+                                                       yPositions,
+                                                       i);
+                    }
+                }
+            }
+            else
+            {
+                if(!needsEdgeEquation1 | triviallyAcceptedSubchunks[1][i])
+                {
+                    if(!needsEdgeEquation2 | triviallyAcceptedSubchunks[2][i])
+                    {
+                        runSubchunk<true, false, false>(renderState,
+                                                        triangleIndex,
+                                                        xOrigin,
+                                                        yOrigin,
+                                                        perLevelState,
+                                                        xPositions,
+                                                        yPositions,
+                                                        i);
+                    }
+                    else
+                    {
+                        runSubchunk<true, false, true>(renderState,
+                                                       triangleIndex,
+                                                       xOrigin,
+                                                       yOrigin,
+                                                       perLevelState,
+                                                       xPositions,
+                                                       yPositions,
+                                                       i);
+                    }
+                }
+                else
+                {
+                    if(!needsEdgeEquation2 | triviallyAcceptedSubchunks[2][i])
+                    {
+                        runSubchunk<true, true, false>(renderState,
+                                                       triangleIndex,
+                                                       xOrigin,
+                                                       yOrigin,
+                                                       perLevelState,
+                                                       xPositions,
+                                                       yPositions,
+                                                       i);
+                    }
+                    else
+                    {
+                        runSubchunk<true, true, true>(renderState,
+                                                      triangleIndex,
+                                                      xOrigin,
+                                                      yOrigin,
+                                                      perLevelState,
+                                                      xPositions,
+                                                      yPositions,
+                                                      i);
+                    }
+                }
+            }
+        }
 #warning finish
     }
 };
@@ -466,60 +795,105 @@ void renderTriangles(ColorImage &colorImage,
     if(colorImage.getWidth() == 0 || colorImage.getHeight() == 0)
         return;
     assert(colorImage.getLayers() == 1 && depthImage.getLayers() == 1);
-    TriangleRenderState renderState(
-        colorImage, depthImage, triangleP1, triangleP2, triangleP3, drawColors, triangleCount);
+    TriangleRenderState renderState(colorImage,
+                                    depthImage,
+                                    triangleP1,
+                                    triangleP2,
+                                    triangleP3,
+                                    drawColors,
+                                    triangleCount,
+                                    0,
+                                    0,
+                                    colorImage.getWidth(),
+                                    colorImage.getHeight());
     if(!renderState.setup())
         return;
     for(std::size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
     {
         if(renderState.drawTriangleMask[triangleIndex])
         {
-#if 0
             if(renderState.trivialAccepts[0][triangleIndex]
                & renderState.trivialAccepts[1][triangleIndex]
                & renderState.trivialAccepts[2][triangleIndex])
             {
-                for(std::size_t y = 0; y < colorImage.getHeight(); y += ChunkLevel<0>::height)
+                for(std::size_t y = 0; y < colorImage.getHeight(); y += ChunkLevel<0>::totalHeight)
                 {
-                    if(y + ChunkLevel<0>::height <= colorImage.getHeight())
+                    if(y + ChunkLevel<0>::totalHeight > colorImage.getHeight())
                     {
-                        for(std::size_t x = 0; x < colorImage.getWidth(); x += ChunkLevel<0>::width)
+                        for(std::size_t x = 0; x < colorImage.getWidth();
+                            x += ChunkLevel<0>::totalWidth)
                         {
-                            if(x + ChunkLevel<0>::width <= colorImage.getWidth())
+                            if(x + ChunkLevel<0>::totalWidth > colorImage.getWidth())
                             {
-#warning finish
+                                RenderTriangleHelper<0,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     true,
+                                                     false,
+                                                     true>::run(renderState, triangleIndex, x, y);
                             }
                             else
                             {
-#warning finish
+                                RenderTriangleHelper<0,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     true>::run(renderState, triangleIndex, x, y);
                             }
                         }
                     }
                     else
                     {
-                        for(std::size_t x = 0; x < colorImage.getWidth(); x += ChunkLevel<0>::width)
+                        for(std::size_t x = 0; x < colorImage.getWidth();
+                            x += ChunkLevel<0>::totalWidth)
                         {
-                            if(x + ChunkLevel<0>::width <= colorImage.getWidth())
+                            if(x + ChunkLevel<0>::totalWidth > colorImage.getWidth())
                             {
-#warning finish
+                                RenderTriangleHelper<0,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     true,
+                                                     false,
+                                                     false>::run(renderState, triangleIndex, x, y);
                             }
                             else
                             {
-#warning finish
+                                RenderTriangleHelper<0,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     false,
+                                                     false>::run(renderState, triangleIndex, x, y);
                             }
                         }
                     }
                 }
             }
             else
-#endif
             {
-                for(std::size_t y = 0; y < colorImage.getHeight(); y += ChunkLevel<0>::height)
+                for(std::size_t y = 0; y < colorImage.getHeight();
+                    y += ChunkLevel<MaxTriangleLevel>::totalHeight)
                 {
-                    for(std::size_t x = 0; x < colorImage.getWidth(); x += ChunkLevel<0>::width)
+                    for(std::size_t x = 0; x < colorImage.getWidth();
+                        x += ChunkLevel<MaxTriangleLevel>::totalWidth)
                     {
-                        RenderTriangleHelper<0, true, true, true>::run(
-                            renderState, triangleIndex, x, y);
+                        RenderTriangleHelper<MaxTriangleLevel,
+                                             true,
+                                             true,
+                                             true,
+                                             false,
+                                             true,
+                                             false,
+                                             true>::run(renderState, triangleIndex, x, y);
                     }
                 }
 #warning finish
@@ -585,7 +959,7 @@ void getTriangle(std::size_t triangleIndex,
     Light lights[] = {
         Light(Vector4F(0, 0, 1, 0), Vector4F(1, 0, 0, 0)),
         Light(Vector4F(std::sqrt(0.75f), 0, -0.5f, 0), Vector4F(0, 1, 0, 0)),
-        Light(Vector4F(-std::sqrt(0.75f), 0, -0.5f, 0), Vector4F(0, 0, 1, 0)),
+        Light(Vector4F(-std::sqrt(0.75f), 1, -0.5f, 0), Vector4F(0, 0, 1, 0)),
     };
     for(Light &light : lights)
     {
@@ -612,6 +986,27 @@ void renderFrame(ColorImage &colorImage, DepthImage &depthImage)
 {
     clearImage(colorImage, 0, {0x20, 0x20, 0x20, 0xFF});
     clearImage(depthImage, 0, INFINITY);
+#if 0
+    Matrix4x4 tform(colorImage.getWidth() / 2.0f,
+                    0,
+                    0,
+                    colorImage.getWidth() / 2.0f,
+                    0,
+                    colorImage.getHeight() / -2.0f,
+                    0,
+                    colorImage.getHeight() / 2.0f,
+                    0,
+                    0,
+                    0.5f,
+                    0.5f);
+    renderTriangles(colorImage,
+                    depthImage,
+                    tform.apply(Vector4FList(1, -1, 0, 1)),
+                    tform.apply(Vector4FList(-1, -1, 0, 1)),
+                    tform.apply(Vector4FList(0, 1, 0, 1)),
+                    TriangleRenderState::Colors(Vector4FList(1)),
+                    1);
+#else
     double currentTime = std::chrono::duration_cast<std::chrono::duration<double>>(
                              std::chrono::steady_clock::now().time_since_epoch()).count();
     Matrix4x4 tform;
@@ -646,8 +1041,8 @@ void renderFrame(ColorImage &colorImage, DepthImage &depthImage)
                                    0,
                                    0.5f,
                                    0.5f));
-    std::size_t uCount = 60;
-    std::size_t vCount = 40;
+    std::size_t uCount = 10;
+    std::size_t vCount = 5;
     std::size_t triangleCount = uCount * vCount * 2;
     for(std::size_t triangleIndex = 0; triangleIndex < triangleCount;
         triangleIndex += ValueListSize)
@@ -680,6 +1075,12 @@ void renderFrame(ColorImage &colorImage, DepthImage &depthImage)
             p3.z[i] = currentP3.z[0];
             p3.w[i] = currentP3.w[0];
         }
+        if(std::fmod(currentTime, 10) < 2)
+        {
+            auto temp = p1;
+            p1 = p2;
+            p2 = temp;
+        }
         renderTriangles(colorImage,
                         depthImage,
                         tform.apply(p1),
@@ -688,11 +1089,12 @@ void renderFrame(ColorImage &colorImage, DepthImage &depthImage)
                         colors,
                         triangleRenderCount);
     }
+#endif
 }
 
 int main()
 {
-    constexpr std::size_t width = 320, height = 240;
+    constexpr std::size_t width = 1920, height = 1080;
     ColorImage colorImage(width, height, 1);
     DepthImage depthImage(width, height, 1);
     if(SDL_Init(SDL_INIT_VIDEO) != 0)
@@ -767,8 +1169,8 @@ int main()
                    || (event.key.keysym.sym == SDLK_F4
                        && (event.key.keysym.mod & (KMOD_CTRL | KMOD_SHIFT)) == 0
                        && (event.key.keysym.mod & KMOD_ALT) != 0))
-                    exit(0);
-                done = true;
+                    done = true;
+                break;
             }
         }
     }
