@@ -31,7 +31,7 @@
 
 using namespace tiled_renderer;
 
-constexpr std::size_t Log2ValueListSize = 8;
+constexpr std::size_t Log2ValueListSize = 2;
 constexpr std::size_t ValueListSize = static_cast<std::size_t>(1) << Log2ValueListSize;
 typedef ValueList<float, ValueListSize> FloatList;
 typedef ValueList<std::int32_t, ValueListSize> I32List;
@@ -535,6 +535,13 @@ Vector4F getPoint(float u, float v)
     return Vector4F(std::sin(u) * std::sin(v), std::cos(v), std::cos(u) * std::sin(v), 1);
 }
 
+Vector4F getPointNormal(float u, float v)
+{
+    u *= 2 * M_PI;
+    v *= M_PI;
+    return Vector4F(std::sin(u) * std::sin(v), std::cos(v), std::cos(u) * std::sin(v), 0);
+}
+
 void getTriangle(std::size_t triangleIndex,
                  std::size_t uCount,
                  std::size_t vCount,
@@ -543,10 +550,6 @@ void getTriangle(std::size_t triangleIndex,
                  Vector4F &p2,
                  Vector4F &p3)
 {
-    color = Color(triangleIndex & 0x1 ? 0xFF : 0,
-                  triangleIndex & 0x2 ? 0xFF : 0,
-                  triangleIndex & 0x4 ? 0xFF : 0,
-                  0xFF);
     bool isSecondPartOfQuad = triangleIndex % 2;
     triangleIndex /= 2;
     float u0 = static_cast<float>(triangleIndex % uCount) / uCount;
@@ -565,16 +568,53 @@ void getTriangle(std::size_t triangleIndex,
         p2 = getPoint(u1, v1);
         p3 = getPoint(u0, v1);
     }
+    Vector4F normal = getPointNormal(0.5f * (u0 + u1), 0.5f * (v0 + v1));
+    normal /= Vector4F(normal.abs());
+    Vector4F colorF(0.3f, 0.3f, 0.3f, 1);
+    struct Light final
+    {
+        Vector4F direction;
+        Vector4F color;
+        Light(Vector4F direction, Vector4F color)
+            : direction(direction / Vector4F(direction.abs())), color(color)
+        {
+        }
+    };
+    Light lights[] = {
+        Light(Vector4F(0, 0, 1, 0), Vector4F(1, 0, 0, 0)),
+        Light(Vector4F(std::sqrt(0.75f), 0, -0.5f, 0), Vector4F(0, 1, 0, 0)),
+        Light(Vector4F(-std::sqrt(0.75f), 0, -0.5f, 0), Vector4F(0, 0, 1, 0)),
+    };
+    for(Light &light : lights)
+    {
+        float dot = normal.dot(light.direction)[0];
+        if(dot < 0)
+            dot = 0;
+        float intensity = dot * 0.7f;
+        colorF += Vector4F(intensity) * light.color;
+    }
+    auto colorI32 = Vector4List<std::int32_t, 1>(colorF * Vector4F(0xFF));
+    ValueList<std::int32_t, 1> minV(0), maxV(0xFF);
+    colorI32.x = select(colorI32.x < minV, minV, colorI32.x);
+    colorI32.y = select(colorI32.y < minV, minV, colorI32.y);
+    colorI32.z = select(colorI32.z < minV, minV, colorI32.z);
+    colorI32.w = select(colorI32.w < minV, minV, colorI32.w);
+    colorI32.x = select(colorI32.x > maxV, maxV, colorI32.x);
+    colorI32.y = select(colorI32.y > maxV, maxV, colorI32.y);
+    colorI32.z = select(colorI32.z > maxV, maxV, colorI32.z);
+    colorI32.w = select(colorI32.w > maxV, maxV, colorI32.w);
+    color = static_cast<Color>(colorI32);
 }
 
-int main()
+void renderFrame(ColorImage &colorImage, DepthImage &depthImage)
 {
-    ColorImage colorImage(1920, 1080, 1);
-    DepthImage depthImage(1920, 1080, 1);
     clearImage(colorImage, 0, {0x20, 0x20, 0x20, 0xFF});
     clearImage(depthImage, 0, INFINITY);
+    double currentTime = std::chrono::duration_cast<std::chrono::duration<double>>(
+                             std::chrono::steady_clock::now().time_since_epoch()).count();
     Matrix4x4 tform;
-    tform = Matrix4x4::rotateY(0.1f);
+    tform = Matrix4x4::rotateY(currentTime * M_PI * 2 / 10);
+    tform = tform.concat(Matrix4x4::rotateX(currentTime * M_PI * 2 / std::sqrt(2) / 10));
     tform = tform.concat(Matrix4x4::translate(0, 0, -2));
     float scaleX = colorImage.getWidth();
     float scaleY = colorImage.getHeight();
@@ -604,8 +644,8 @@ int main()
                                    0,
                                    0.5f,
                                    0.5f));
-    std::size_t uCount = 10;
-    std::size_t vCount = 10;
+    std::size_t uCount = 300;
+    std::size_t vCount = 200;
     std::size_t triangleCount = uCount * vCount * 2;
     for(std::size_t triangleIndex = 0; triangleIndex < triangleCount;
         triangleIndex += ValueListSize)
@@ -645,9 +685,94 @@ int main()
                         tform.apply(p3),
                         colors,
                         triangleRenderCount);
-        std::cout << static_cast<int>((triangleIndex + triangleRenderCount) * 100 / triangleCount)
-                  << "%...\r" << std::flush;
     }
-    std::cout << "done.                    " << std::endl;
+}
+
+int main()
+{
+    constexpr std::size_t width = 320, height = 240;
+    ColorImage colorImage(width, height, 1);
+    DepthImage depthImage(width, height, 1);
+    if(SDL_Init(SDL_INIT_VIDEO) != 0)
+    {
+        std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
+        return 1;
+    }
+    SDL_Window *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    if(SDL_CreateWindowAndRenderer(width, height, 0, &window, &renderer) != 0)
+    {
+        std::cerr << "SDL_CreateWindowAndRenderer failed: " << SDL_GetError() << std::endl;
+        SDL_Quit();
+        return 1;
+    }
+#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+    constexpr auto pixelFormat = SDL_PIXELFORMAT_RGBA8888;
+#else
+    constexpr auto pixelFormat = SDL_PIXELFORMAT_ABGR8888;
+#endif
+    SDL_Texture *texture =
+        SDL_CreateTexture(renderer, pixelFormat, SDL_TEXTUREACCESS_STREAMING, width, height);
+    if(!texture)
+    {
+        std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << std::endl;
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+    bool done = false;
+    while(!done)
+    {
+        renderFrame(colorImage, depthImage);
+        void *pixels = nullptr;
+        int pitch = 0;
+        if(SDL_LockTexture(texture, nullptr, &pixels, &pitch) != 0)
+        {
+            std::cerr << "SDL_LockTexture failed: " << SDL_GetError() << std::endl;
+            SDL_DestroyTexture(texture);
+            SDL_DestroyRenderer(renderer);
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 1;
+        }
+        for(std::size_t y = 0; y < height; y++)
+        {
+            unsigned char *currentPixel = static_cast<unsigned char *>(pixels) + pitch * y;
+            for(std::size_t x = 0; x < width; x++)
+            {
+                auto color = colorImage.getElementUnchecked(x, y, 0);
+                *currentPixel++ = color.x[0];
+                *currentPixel++ = color.y[0];
+                *currentPixel++ = color.z[0];
+                *currentPixel++ = color.w[0];
+            }
+        }
+        SDL_UnlockTexture(texture);
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+        SDL_RenderPresent(renderer);
+        SDL_Event event;
+        while(SDL_PollEvent(&event))
+        {
+            switch(event.type)
+            {
+            case SDL_QUIT:
+                done = true;
+                break;
+            case SDL_KEYDOWN:
+                if(event.key.keysym.sym == SDLK_ESCAPE
+                   || (event.key.keysym.sym == SDLK_F4
+                       && (event.key.keysym.mod & (KMOD_CTRL | KMOD_SHIFT)) == 0
+                       && (event.key.keysym.mod & KMOD_ALT) != 0))
+                    exit(0);
+                done = true;
+            }
+        }
+    }
     writeImage("out.ppm", colorImage);
+    SDL_DestroyTexture(texture);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
 }

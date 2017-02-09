@@ -1,6 +1,3 @@
-/Debug/
-/Release/
 /.settings/
-/Debug Unoptimized/
-/Debug AddressSanitizer/
+/build*
 /out.ppm

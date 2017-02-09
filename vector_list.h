@@ -48,6 +48,13 @@ struct Vector3List final
     Vector3List(const Vector3List<T, 1> &v) noexcept : x(v.x), y(v.y), z(v.z)
     {
     }
+    template <typename T2>
+    explicit operator Vector3List<T2, N>() const noexcept
+    {
+        return Vector3List<T2, N>(static_cast<ValueList<T2, N>>(x),
+                                  static_cast<ValueList<T2, N>>(y),
+                                  static_cast<ValueList<T2, N>>(z));
+    }
     const Vector3List &operator+() const noexcept
     {
         return *this;
@@ -214,6 +221,14 @@ struct Vector4List final
     explicit operator Vector3List<T, N>() const noexcept
     {
         return Vector3List<T, N>(x, y, z);
+    }
+    template <typename T2>
+    explicit operator Vector4List<T2, N>() const noexcept
+    {
+        return Vector4List<T2, N>(static_cast<ValueList<T2, N>>(x),
+                                  static_cast<ValueList<T2, N>>(y),
+                                  static_cast<ValueList<T2, N>>(z),
+                                  static_cast<ValueList<T2, N>>(w));
     }
     const Vector4List &operator+() const noexcept
     {
