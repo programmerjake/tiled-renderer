@@ -571,6 +571,8 @@ void getTriangle(std::size_t triangleIndex,
     Vector4F normal = getPointNormal(0.5f * (u0 + u1), 0.5f * (v0 + v1));
     normal /= Vector4F(normal.abs());
     Vector4F colorF(0.3f, 0.3f, 0.3f, 1);
+    if(isSecondPartOfQuad)
+        colorF = Vector4F(0.2f, 0.2f, 0.2f, 1);
     struct Light final
     {
         Vector4F direction;
@@ -644,8 +646,8 @@ void renderFrame(ColorImage &colorImage, DepthImage &depthImage)
                                    0,
                                    0.5f,
                                    0.5f));
-    std::size_t uCount = 300;
-    std::size_t vCount = 200;
+    std::size_t uCount = 60;
+    std::size_t vCount = 40;
     std::size_t triangleCount = uCount * vCount * 2;
     for(std::size_t triangleIndex = 0; triangleIndex < triangleCount;
         triangleIndex += ValueListSize)
