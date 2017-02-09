@@ -22,18 +22,24 @@
 #include "vector_list.h"
 #include "matrix_list.h"
 #include "image.h"
+#include "rasterize_chunk.h"
 #include <iostream>
 #include <fstream>
 #include <cstdint>
 #include <cassert>
 #include <string>
 #include <chrono>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <memory>
+#include <deque>
+#include <sstream>
 #include "SDL.h"
 
 using namespace tiled_renderer;
 
-constexpr std::size_t Log2ValueListSize = 3;
-constexpr std::size_t ValueListSize = static_cast<std::size_t>(1) << Log2ValueListSize;
 typedef ValueList<float, ValueListSize> FloatList;
 typedef ValueList<std::int32_t, ValueListSize> I32List;
 typedef ValueList<Bool32, ValueListSize> Bool32List;
@@ -45,70 +51,6 @@ typedef Image<float> DepthImage;
 typedef Vector4List<std::uint8_t, 1> Color;
 typedef Image<Color> ColorImage;
 typedef Matrix4x4List<1> Matrix4x4;
-
-template <std::size_t Level>
-struct ChunkLevel;
-
-template <>
-struct ChunkLevel<0> final
-{
-    static_assert(Log2ValueListSize > 0, "");
-    static constexpr std::size_t subchunkWidth = static_cast<std::size_t>(1)
-                                                 << (Log2ValueListSize + 1) / 2;
-    static constexpr std::size_t subchunkHeight = static_cast<std::size_t>(1)
-                                                  << (Log2ValueListSize) / 2;
-    static constexpr std::size_t totalWidth = subchunkWidth;
-    static constexpr std::size_t totalHeight = subchunkHeight;
-    static constexpr std::size_t xStepSize = 1;
-    static constexpr std::size_t yStepSize = 1;
-    static I32List getXPositions() noexcept
-    {
-        I32List retval{};
-        for(std::size_t i = 0; i < ValueListSize; i++)
-        {
-            retval[i] = i % subchunkWidth;
-        }
-        return retval;
-    }
-    static I32List getYPositions() noexcept
-    {
-        I32List retval{};
-        for(std::size_t i = 0; i < ValueListSize; i++)
-        {
-            retval[i] = i / subchunkWidth;
-        }
-        return retval;
-    }
-};
-
-template <std::size_t Level>
-struct ChunkLevel final
-{
-    static constexpr std::size_t subchunkWidth = ChunkLevel<Level - 1>::subchunkHeight;
-    static constexpr std::size_t subchunkHeight = ChunkLevel<Level - 1>::subchunkWidth;
-    static constexpr std::size_t totalWidth = ChunkLevel<Level - 1>::totalWidth * subchunkWidth;
-    static constexpr std::size_t totalHeight = ChunkLevel<Level - 1>::totalHeight * subchunkHeight;
-    static constexpr std::size_t xStepSize = ChunkLevel<Level - 1>::totalWidth;
-    static constexpr std::size_t yStepSize = ChunkLevel<Level - 1>::totalHeight;
-    static I32List getXPositions() noexcept
-    {
-        I32List retval{};
-        for(std::size_t i = 0; i < ValueListSize; i++)
-        {
-            retval[i] = (i % subchunkWidth) * xStepSize;
-        }
-        return retval;
-    }
-    static I32List getYPositions() noexcept
-    {
-        I32List retval{};
-        for(std::size_t i = 0; i < ValueListSize; i++)
-        {
-            retval[i] = (i / subchunkWidth) * yStepSize;
-        }
-        return retval;
-    }
-};
 
 void writeImage(const std::string &fileName, const ColorImage &image)
 {
@@ -162,7 +104,6 @@ struct MakeLevelList final
     typedef typename MakeLevelList<Level - 1, Level, Levels...>::type type;
 };
 
-constexpr std::size_t MaxTriangleLevel = 4;
 constexpr std::size_t EdgeEquationFractionalBits = 18;
 
 struct TriangleRenderState final
@@ -199,13 +140,9 @@ struct TriangleRenderState final
     };
     struct PerLevelState final
     {
-        I32List edgeEquationXSteps[3];
-        I32List edgeEquationYSteps[3];
-        I32List edgeEquationConstants[3];
-        I32List trivialRejectX[3];
-        I32List trivialRejectY[3];
-        I32List trivialAcceptX[3];
-        I32List trivialAcceptY[3];
+        I32List subchunks[3];
+        I32List trivialReject[3];
+        I32List trivialAccept[3];
     };
     ColorImage &colorImage;
     DepthImage &depthImage;
@@ -214,7 +151,7 @@ struct TriangleRenderState final
     const Vector4FList triangleP3;
     const Colors drawColors;
     const std::size_t triangleCount;
-    PerLevelState perLevelStates[ValueListSize][MaxTriangleLevel + 1];
+    PerLevelState perLevelStates[ValueListSize][MaxChunkLevel + 1];
     Bool32List drawTriangleMask;
     I32List edgeEquationConstants[3];
     I32List edgeEquationXSteps[3];
@@ -225,6 +162,7 @@ struct TriangleRenderState final
     const std::int32_t scissorY;
     const std::int32_t scissorWidth;
     const std::int32_t scissorHeight;
+    bool good;
     TriangleRenderState(ColorImage &colorImage,
                         DepthImage &depthImage,
                         Vector4FList triangleP1,
@@ -252,8 +190,10 @@ struct TriangleRenderState final
                                                                scissorX(scissorX),
                                                                scissorY(scissorY),
                                                                scissorWidth(scissorWidth),
-                                                               scissorHeight(scissorHeight)
+                                                               scissorHeight(scissorHeight),
+                                                               good(true)
     {
+        good = setup();
     }
     static Bool32List checkEdgeEquationList(const FloatList &constant,
                                             const FloatList &xStep,
@@ -277,33 +217,24 @@ struct TriangleRenderState final
         PerLevelState &perLevelState = perLevelStates[triangleIndex][Level];
         for(std::size_t i = 0; i < 3; i++)
         {
-            perLevelState.edgeEquationXSteps[i] =
-                I32List(edgeEquationXSteps[i][triangleIndex]) * ChunkLevel<Level>::getXPositions();
-            perLevelState.edgeEquationYSteps[i] =
-                I32List(edgeEquationYSteps[i][triangleIndex]) * ChunkLevel<Level>::getYPositions();
-            perLevelState.edgeEquationConstants[i] =
-                I32List(edgeEquationConstants[i][triangleIndex])
-                + perLevelState.edgeEquationXSteps[i] + perLevelState.edgeEquationYSteps[i];
-            ValueList<Bool32, ValueListSize> compareResultX(edgeEquationXSteps[i][triangleIndex]
-                                                            > 0);
-            ValueList<Bool32, ValueListSize> compareResultY(edgeEquationYSteps[i][triangleIndex]
-                                                            > 0);
-            perLevelState.trivialRejectX[i] = select(
-                compareResultX,
-                ChunkLevel<Level>::getXPositions() + I32List(ChunkLevel<Level>::xStepSize - 1),
-                ChunkLevel<Level>::getXPositions());
-            perLevelState.trivialRejectY[i] = select(
-                compareResultY,
-                ChunkLevel<Level>::getYPositions() + I32List(ChunkLevel<Level>::yStepSize - 1),
-                ChunkLevel<Level>::getYPositions());
-            perLevelState.trivialAcceptX[i] = select(
-                compareResultX,
-                ChunkLevel<Level>::getXPositions(),
-                ChunkLevel<Level>::getXPositions() + I32List(ChunkLevel<Level>::xStepSize - 1));
-            perLevelState.trivialAcceptY[i] = select(
-                compareResultY,
-                ChunkLevel<Level>::getYPositions(),
-                ChunkLevel<Level>::getYPositions() + I32List(ChunkLevel<Level>::yStepSize - 1));
+            perLevelState.subchunks[i] =
+                I32List(edgeEquationXSteps[i][triangleIndex]) * ChunkLevel<Level>::getXPositions()
+                + I32List(edgeEquationYSteps[i][triangleIndex])
+                      * ChunkLevel<Level>::getYPositions();
+            perLevelState.trivialAccept[i] = perLevelState.subchunks[i];
+            perLevelState.trivialReject[i] = perLevelState.subchunks[i];
+            I32List oppositeX =
+                I32List((ChunkLevel<Level>::xStepSize - 1) * edgeEquationXSteps[i][triangleIndex]);
+            I32List oppositeY =
+                I32List((ChunkLevel<Level>::yStepSize - 1) * edgeEquationYSteps[i][triangleIndex]);
+            if(edgeEquationXSteps[i][triangleIndex] > 0)
+                perLevelState.trivialReject[i] += oppositeX;
+            else
+                perLevelState.trivialAccept[i] += oppositeX;
+            if(edgeEquationYSteps[i][triangleIndex] > 0)
+                perLevelState.trivialReject[i] += oppositeY;
+            else
+                perLevelState.trivialAccept[i] += oppositeY;
         }
         return 0;
     }
@@ -313,6 +244,8 @@ struct TriangleRenderState final
         char unused[] = {fillPerLevelStates<Levels>(triangleIndex)...};
         static_cast<void>(unused);
     }
+
+private:
     bool setup() noexcept
     {
         Bool32List triangleCountMask(true);
@@ -431,7 +364,7 @@ struct TriangleRenderState final
             if(drawTriangleMask[triangleIndex] & !trivialAccept[triangleIndex])
                 fillAllPerLevelStates(
                     triangleIndex,
-                    static_cast<const MakeLevelList<MaxTriangleLevel>::type *>(nullptr));
+                    static_cast<const MakeLevelList<MaxChunkLevel>::type *>(nullptr));
         return true;
     }
 };
@@ -466,27 +399,24 @@ struct RenderTriangleHelper<0,
     static void run(const TriangleRenderState &renderState,
                     std::size_t triangleIndex,
                     std::int32_t xOrigin,
-                    std::int32_t yOrigin) noexcept
+                    std::int32_t yOrigin,
+                    std::int32_t originEdgeEquation0Constant,
+                    std::int32_t originEdgeEquation1Constant,
+                    std::int32_t originEdgeEquation2Constant) noexcept
     {
         auto &perLevelState = renderState.perLevelStates[triangleIndex][Level];
         I32List xPositions = I32List(xOrigin) + ChunkLevel<Level>::getXPositions();
         I32List yPositions = I32List(yOrigin) + ChunkLevel<Level>::getYPositions();
         Bool32List passingPixels(true);
         if(needsEdgeEquation0)
-            passingPixels &= I32List(xOrigin * renderState.edgeEquationXSteps[0][triangleIndex]
-                                     + yOrigin * renderState.edgeEquationYSteps[0][triangleIndex])
-                                 + perLevelState.edgeEquationConstants[0]
-                             >= I32List(0);
+            passingPixels &=
+                I32List(originEdgeEquation0Constant) + perLevelState.trivialAccept[0] >= I32List(0);
         if(needsEdgeEquation1)
-            passingPixels &= I32List(xOrigin * renderState.edgeEquationXSteps[1][triangleIndex]
-                                     + yOrigin * renderState.edgeEquationYSteps[1][triangleIndex])
-                                 + perLevelState.edgeEquationConstants[1]
-                             >= I32List(0);
+            passingPixels &=
+                I32List(originEdgeEquation1Constant) + perLevelState.trivialAccept[1] >= I32List(0);
         if(needsEdgeEquation2)
-            passingPixels &= I32List(xOrigin * renderState.edgeEquationXSteps[2][triangleIndex]
-                                     + yOrigin * renderState.edgeEquationYSteps[2][triangleIndex])
-                                 + perLevelState.edgeEquationConstants[2]
-                             >= I32List(0);
+            passingPixels &=
+                I32List(originEdgeEquation2Constant) + perLevelState.trivialAccept[2] >= I32List(0);
         if(needsScissorNX)
             passingPixels &= xPositions >= I32List(renderState.scissorX);
         if(needsScissorNY)
@@ -524,6 +454,9 @@ struct RenderTriangleHelper final
                             std::size_t triangleIndex,
                             std::int32_t xOrigin,
                             std::int32_t yOrigin,
+                            std::int32_t originEdgeEquation0Constant,
+                            std::int32_t originEdgeEquation1Constant,
+                            std::int32_t originEdgeEquation2Constant,
                             const TriangleRenderState::PerLevelState &perLevelState,
                             const I32List &xPositions,
                             const I32List &yPositions,
@@ -539,52 +472,29 @@ struct RenderTriangleHelper final
                              needsScissorNX,
                              needsScissorPX,
                              needsScissorNY,
-                             needsScissorPY>::run(renderState,
-                                                  triangleIndex,
-                                                  xPositions[valueListIndex],
-                                                  yPositions[valueListIndex]);
-#endif
-#if 0
-#warning debug code enabled
-        auto trivialReject0 = (I32List(xOrigin) + perLevelState.trivialRejectX[0])
-                                      * I32List(renderState.edgeEquationXSteps[0][triangleIndex])
-                                  + (I32List(yOrigin) + perLevelState.trivialRejectY[0])
-                                        * I32List(renderState.edgeEquationYSteps[0][triangleIndex])
-                                  + I32List(renderState.edgeEquationConstants[0][triangleIndex])
-                              >= I32List(0);
-        renderState.colorImage.setElement(
-            (I32List(xOrigin) + perLevelState.trivialRejectX[0])[valueListIndex],
-            (I32List(yOrigin) + perLevelState.trivialRejectY[0])[valueListIndex],
-            0,
-            Color(trivialReject0[valueListIndex] ? 0xFF : 0x80, 0, 0, 0xFF));
-        auto trivialReject1 = (I32List(xOrigin) + perLevelState.trivialRejectX[1])
-                                      * I32List(renderState.edgeEquationXSteps[1][triangleIndex])
-                                  + (I32List(yOrigin) + perLevelState.trivialRejectY[1])
-                                        * I32List(renderState.edgeEquationYSteps[1][triangleIndex])
-                                  + I32List(renderState.edgeEquationConstants[1][triangleIndex])
-                              >= I32List(0);
-        renderState.colorImage.setElement(
-            (I32List(xOrigin) + perLevelState.trivialRejectX[1])[valueListIndex],
-            (I32List(yOrigin) + perLevelState.trivialRejectY[1])[valueListIndex],
-            0,
-            Color(0, trivialReject1[valueListIndex] ? 0xFF : 0x80, 0, 0xFF));
-        auto trivialReject2 = (I32List(xOrigin) + perLevelState.trivialRejectX[2])
-                                      * I32List(renderState.edgeEquationXSteps[2][triangleIndex])
-                                  + (I32List(yOrigin) + perLevelState.trivialRejectY[2])
-                                        * I32List(renderState.edgeEquationYSteps[2][triangleIndex])
-                                  + I32List(renderState.edgeEquationConstants[2][triangleIndex])
-                              >= I32List(0);
-        renderState.colorImage.setElement(
-            (I32List(xOrigin) + perLevelState.trivialRejectX[2])[valueListIndex],
-            (I32List(yOrigin) + perLevelState.trivialRejectY[2])[valueListIndex],
-            0,
-            Color(0, 0, trivialReject2[valueListIndex] ? 0xFF : 0x80, 0xFF));
+                             needsScissorPY>::
+            run(renderState,
+                triangleIndex,
+                xPositions[valueListIndex],
+                yPositions[valueListIndex],
+                newNeedsEdgeEquation0 ?
+                    originEdgeEquation0Constant + perLevelState.subchunks[0][valueListIndex] :
+                    0,
+                newNeedsEdgeEquation1 ?
+                    originEdgeEquation1Constant + perLevelState.subchunks[1][valueListIndex] :
+                    0,
+                newNeedsEdgeEquation2 ?
+                    originEdgeEquation2Constant + perLevelState.subchunks[2][valueListIndex] :
+                    0);
 #endif
     }
     static void run(const TriangleRenderState &renderState,
                     std::size_t triangleIndex,
                     std::int32_t xOrigin,
-                    std::int32_t yOrigin) noexcept
+                    std::int32_t yOrigin,
+                    std::int32_t originEdgeEquation0Constant,
+                    std::int32_t originEdgeEquation1Constant,
+                    std::int32_t originEdgeEquation2Constant) noexcept
     {
         auto &perLevelState = renderState.perLevelStates[triangleIndex][Level];
         I32List xPositions = I32List(xOrigin) + ChunkLevel<Level>::getXPositions();
@@ -608,53 +518,23 @@ struct RenderTriangleHelper final
         if(needsEdgeEquation0)
         {
             passingSubchunks &=
-                (I32List(xOrigin) + perLevelState.trivialRejectX[0])
-                        * I32List(renderState.edgeEquationXSteps[0][triangleIndex])
-                    + (I32List(yOrigin) + perLevelState.trivialRejectY[0])
-                          * I32List(renderState.edgeEquationYSteps[0][triangleIndex])
-                    + I32List(renderState.edgeEquationConstants[0][triangleIndex])
-                >= I32List(0);
+                I32List(originEdgeEquation0Constant) + perLevelState.trivialReject[0] >= I32List(0);
             triviallyAcceptedSubchunks[0] =
-                (I32List(xOrigin) + perLevelState.trivialAcceptX[0])
-                        * I32List(renderState.edgeEquationXSteps[0][triangleIndex])
-                    + (I32List(yOrigin) + perLevelState.trivialAcceptY[0])
-                          * I32List(renderState.edgeEquationYSteps[0][triangleIndex])
-                    + I32List(renderState.edgeEquationConstants[0][triangleIndex])
-                >= I32List(0);
+                I32List(originEdgeEquation0Constant) + perLevelState.trivialAccept[0] >= I32List(0);
         }
         if(needsEdgeEquation1)
         {
             passingSubchunks &=
-                (I32List(xOrigin) + perLevelState.trivialRejectX[1])
-                        * I32List(renderState.edgeEquationXSteps[1][triangleIndex])
-                    + (I32List(yOrigin) + perLevelState.trivialRejectY[1])
-                          * I32List(renderState.edgeEquationYSteps[1][triangleIndex])
-                    + I32List(renderState.edgeEquationConstants[1][triangleIndex])
-                >= I32List(0);
+                I32List(originEdgeEquation1Constant) + perLevelState.trivialReject[1] >= I32List(0);
             triviallyAcceptedSubchunks[1] =
-                (I32List(xOrigin) + perLevelState.trivialAcceptX[1])
-                        * I32List(renderState.edgeEquationXSteps[1][triangleIndex])
-                    + (I32List(yOrigin) + perLevelState.trivialAcceptY[1])
-                          * I32List(renderState.edgeEquationYSteps[1][triangleIndex])
-                    + I32List(renderState.edgeEquationConstants[1][triangleIndex])
-                >= I32List(0);
+                I32List(originEdgeEquation1Constant) + perLevelState.trivialAccept[1] >= I32List(0);
         }
         if(needsEdgeEquation2)
         {
             passingSubchunks &=
-                (I32List(xOrigin) + perLevelState.trivialRejectX[2])
-                        * I32List(renderState.edgeEquationXSteps[2][triangleIndex])
-                    + (I32List(yOrigin) + perLevelState.trivialRejectY[2])
-                          * I32List(renderState.edgeEquationYSteps[2][triangleIndex])
-                    + I32List(renderState.edgeEquationConstants[2][triangleIndex])
-                >= I32List(0);
+                I32List(originEdgeEquation2Constant) + perLevelState.trivialReject[2] >= I32List(0);
             triviallyAcceptedSubchunks[2] =
-                (I32List(xOrigin) + perLevelState.trivialAcceptX[2])
-                        * I32List(renderState.edgeEquationXSteps[2][triangleIndex])
-                    + (I32List(yOrigin) + perLevelState.trivialAcceptY[2])
-                          * I32List(renderState.edgeEquationYSteps[2][triangleIndex])
-                    + I32List(renderState.edgeEquationConstants[2][triangleIndex])
-                >= I32List(0);
+                I32List(originEdgeEquation2Constant) + perLevelState.trivialAccept[2] >= I32List(0);
         }
 #if 0
 #warning debug code enabled
@@ -680,6 +560,9 @@ struct RenderTriangleHelper final
                                                          triangleIndex,
                                                          xOrigin,
                                                          yOrigin,
+                                                         originEdgeEquation0Constant,
+                                                         originEdgeEquation1Constant,
+                                                         originEdgeEquation2Constant,
                                                          perLevelState,
                                                          xPositions,
                                                          yPositions,
@@ -691,6 +574,9 @@ struct RenderTriangleHelper final
                                                         triangleIndex,
                                                         xOrigin,
                                                         yOrigin,
+                                                        originEdgeEquation0Constant,
+                                                        originEdgeEquation1Constant,
+                                                        originEdgeEquation2Constant,
                                                         perLevelState,
                                                         xPositions,
                                                         yPositions,
@@ -705,6 +591,9 @@ struct RenderTriangleHelper final
                                                         triangleIndex,
                                                         xOrigin,
                                                         yOrigin,
+                                                        originEdgeEquation0Constant,
+                                                        originEdgeEquation1Constant,
+                                                        originEdgeEquation2Constant,
                                                         perLevelState,
                                                         xPositions,
                                                         yPositions,
@@ -716,6 +605,9 @@ struct RenderTriangleHelper final
                                                        triangleIndex,
                                                        xOrigin,
                                                        yOrigin,
+                                                       originEdgeEquation0Constant,
+                                                       originEdgeEquation1Constant,
+                                                       originEdgeEquation2Constant,
                                                        perLevelState,
                                                        xPositions,
                                                        yPositions,
@@ -733,6 +625,9 @@ struct RenderTriangleHelper final
                                                         triangleIndex,
                                                         xOrigin,
                                                         yOrigin,
+                                                        originEdgeEquation0Constant,
+                                                        originEdgeEquation1Constant,
+                                                        originEdgeEquation2Constant,
                                                         perLevelState,
                                                         xPositions,
                                                         yPositions,
@@ -744,6 +639,9 @@ struct RenderTriangleHelper final
                                                        triangleIndex,
                                                        xOrigin,
                                                        yOrigin,
+                                                       originEdgeEquation0Constant,
+                                                       originEdgeEquation1Constant,
+                                                       originEdgeEquation2Constant,
                                                        perLevelState,
                                                        xPositions,
                                                        yPositions,
@@ -758,6 +656,9 @@ struct RenderTriangleHelper final
                                                        triangleIndex,
                                                        xOrigin,
                                                        yOrigin,
+                                                       originEdgeEquation0Constant,
+                                                       originEdgeEquation1Constant,
+                                                       originEdgeEquation2Constant,
                                                        perLevelState,
                                                        xPositions,
                                                        yPositions,
@@ -769,6 +670,9 @@ struct RenderTriangleHelper final
                                                       triangleIndex,
                                                       xOrigin,
                                                       yOrigin,
+                                                      originEdgeEquation0Constant,
+                                                      originEdgeEquation1Constant,
+                                                      originEdgeEquation2Constant,
                                                       perLevelState,
                                                       xPositions,
                                                       yPositions,
@@ -781,125 +685,288 @@ struct RenderTriangleHelper final
     }
 };
 
-void renderTriangles(ColorImage &colorImage,
-                     DepthImage &depthImage,
-                     Vector4FList triangleP1,
-                     Vector4FList triangleP2,
-                     Vector4FList triangleP3,
-                     TriangleRenderState::Colors drawColors,
-                     std::size_t triangleCount) noexcept
+struct Triangle final
 {
-    assert(triangleCount <= ValueListSize);
-    assert(colorImage.getWidth() == depthImage.getWidth()
-           && colorImage.getHeight() == depthImage.getHeight());
-    if(colorImage.getWidth() == 0 || colorImage.getHeight() == 0)
-        return;
-    assert(colorImage.getLayers() == 1 && depthImage.getLayers() == 1);
-    TriangleRenderState renderState(colorImage,
-                                    depthImage,
-                                    triangleP1,
-                                    triangleP2,
-                                    triangleP3,
-                                    drawColors,
-                                    triangleCount,
-                                    0,
-                                    0,
-                                    colorImage.getWidth(),
-                                    colorImage.getHeight());
-    if(!renderState.setup())
-        return;
-    for(std::size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
+    Vector4F p1;
+    Vector4F p2;
+    Vector4F p3;
+    Color color;
+    Triangle()
     {
-        if(renderState.drawTriangleMask[triangleIndex])
+    }
+    Triangle(Vector4F p1, Vector4F p2, Vector4F p3, Color color)
+        : p1(p1), p2(p2), p3(p3), color(color)
+    {
+    }
+};
+
+struct ThreadedTaskRunner final
+{
+    ThreadedTaskRunner(const ThreadedTaskRunner &) = delete;
+    ThreadedTaskRunner &operator=(const ThreadedTaskRunner &) = delete;
+    struct Fence final
+    {
+        std::mutex lock;
+        std::condition_variable cond;
+        std::size_t scheduledTaskCount;
+        void waitForCompletion()
         {
-            if(renderState.trivialAccepts[0][triangleIndex]
-               & renderState.trivialAccepts[1][triangleIndex]
-               & renderState.trivialAccepts[2][triangleIndex])
+            std::unique_lock<std::mutex> lockIt(lock);
+            while(scheduledTaskCount > 0)
             {
-                for(std::size_t y = 0; y < colorImage.getHeight(); y += ChunkLevel<0>::totalHeight)
-                {
-                    if(y + ChunkLevel<0>::totalHeight > colorImage.getHeight())
-                    {
-                        for(std::size_t x = 0; x < colorImage.getWidth();
-                            x += ChunkLevel<0>::totalWidth)
-                        {
-                            if(x + ChunkLevel<0>::totalWidth > colorImage.getWidth())
-                            {
-                                RenderTriangleHelper<0,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     true,
-                                                     false,
-                                                     true>::run(renderState, triangleIndex, x, y);
-                            }
-                            else
-                            {
-                                RenderTriangleHelper<0,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     true>::run(renderState, triangleIndex, x, y);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        for(std::size_t x = 0; x < colorImage.getWidth();
-                            x += ChunkLevel<0>::totalWidth)
-                        {
-                            if(x + ChunkLevel<0>::totalWidth > colorImage.getWidth())
-                            {
-                                RenderTriangleHelper<0,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     true,
-                                                     false,
-                                                     false>::run(renderState, triangleIndex, x, y);
-                            }
-                            else
-                            {
-                                RenderTriangleHelper<0,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     false,
-                                                     false>::run(renderState, triangleIndex, x, y);
-                            }
-                        }
-                    }
-                }
-            }
-            else
-            {
-                for(std::size_t y = 0; y < colorImage.getHeight();
-                    y += ChunkLevel<MaxTriangleLevel>::totalHeight)
-                {
-                    for(std::size_t x = 0; x < colorImage.getWidth();
-                        x += ChunkLevel<MaxTriangleLevel>::totalWidth)
-                    {
-                        RenderTriangleHelper<MaxTriangleLevel,
-                                             true,
-                                             true,
-                                             true,
-                                             false,
-                                             true,
-                                             false,
-                                             true>::run(renderState, triangleIndex, x, y);
-                    }
-                }
-#warning finish
+                cond.wait(lockIt);
             }
         }
+        void addTask()
+        {
+            std::unique_lock<std::mutex> lockIt(lock);
+            scheduledTaskCount++;
+        }
+        void taskFinished()
+        {
+            std::unique_lock<std::mutex> lockIt(lock);
+            scheduledTaskCount--;
+            if(scheduledTaskCount == 0)
+                cond.notify_all();
+        }
+    };
+    struct Task
+    {
+        std::shared_ptr<Fence> fence;
+        explicit Task(std::shared_ptr<Fence> fence) : fence(fence)
+        {
+        }
+        virtual ~Task() = default;
+        virtual void run() noexcept = 0;
+    };
+    std::vector<std::thread> threads;
+    std::mutex lock;
+    std::condition_variable cond;
+    bool done = false;
+    std::deque<std::shared_ptr<Task>> tasks;
+    std::size_t waitingThreadCount = 0;
+    void threadFn() noexcept
+    {
+        std::unique_lock<std::mutex> lockIt(lock);
+        while(true)
+        {
+            if(done)
+                break;
+            if(tasks.empty())
+            {
+                waitingThreadCount++;
+                cond.wait(lockIt);
+                waitingThreadCount--;
+                continue;
+            }
+            auto task = std::move(tasks.front());
+            tasks.pop_front();
+            lockIt.unlock();
+            task->run();
+            if(task->fence)
+                task->fence->taskFinished();
+            lockIt.lock();
+        }
     }
+    ~ThreadedTaskRunner()
+    {
+        std::unique_lock<std::mutex> lockIt(lock);
+        done = true;
+        cond.notify_all();
+        lockIt.unlock();
+        for(auto &thread : threads)
+            thread.join();
+    }
+    explicit ThreadedTaskRunner(std::size_t threadCount = std::thread::hardware_concurrency())
+    {
+        threads.resize(threadCount);
+        for(auto &thread : threads)
+        {
+            thread = std::thread([this]()
+                                 {
+                                     threadFn();
+                                 });
+        }
+    }
+    void addTask(std::shared_ptr<Task> task)
+    {
+        assert(task);
+        if(threads.empty())
+        {
+            task->run();
+            return;
+        }
+        if(task->fence)
+            task->fence->addTask();
+        std::unique_lock<std::mutex> lockIt(lock);
+        tasks.push_back(std::move(task));
+        if(waitingThreadCount != 0)
+            cond.notify_one();
+    }
+    std::size_t getParallelism() const noexcept
+    {
+        return threads.empty() ? 1 : threads.size();
+    }
+};
+
+template <typename Fn>
+void runInThreads(ThreadedTaskRunner &threadedTaskRunner, std::size_t threadCount, Fn fn)
+{
+    assert(threadCount != 0);
+    auto fence = std::make_shared<ThreadedTaskRunner::Fence>();
+    for(std::size_t i = 0; i < threadCount; i++)
+    {
+        struct MyTask final : public ThreadedTaskRunner::Task
+        {
+            const std::size_t threadIndex;
+            Fn fn;
+            explicit MyTask(std::shared_ptr<ThreadedTaskRunner::Fence> fence,
+                            std::size_t threadIndex,
+                            Fn fn)
+                : Task(std::move(fence)), threadIndex(threadIndex), fn(std::move(fn))
+            {
+            }
+            virtual void run() noexcept override
+            {
+                fn(threadIndex);
+            }
+        };
+        threadedTaskRunner.addTask(std::make_shared<MyTask>(fence, i, fn));
+    }
+    fence->waitForCompletion();
+}
+
+void renderTriangles(ColorImage &colorImage,
+                     DepthImage &depthImage,
+                     const Triangle *const triangles,
+                     const std::size_t triangleCount,
+                     Matrix4x4 tform,
+                     ThreadedTaskRunner &threadedTaskRunner) noexcept
+{
+    assert(colorImage.getWidth() == depthImage.getWidth()
+           && colorImage.getHeight() == depthImage.getHeight());
+    if(colorImage.getWidth() == 0 || colorImage.getHeight() == 0 || triangleCount == 0)
+        return;
+    assert(colorImage.getLayers() == 1 && depthImage.getLayers() == 1);
+    std::vector<std::vector<TriangleRenderState>> renderStates;
+    std::size_t triangleGroupCount = (triangleCount + ValueListSize - 1) / ValueListSize;
+    std::size_t setupThreadCount = triangleGroupCount / 1000;
+    if(setupThreadCount == 0)
+        setupThreadCount = 1;
+    std::size_t maxParallelism =4 * threadedTaskRunner.getParallelism();
+    if(setupThreadCount > maxParallelism)
+        setupThreadCount = maxParallelism;
+    renderStates.resize(setupThreadCount);
+    runInThreads(
+        threadedTaskRunner,
+        setupThreadCount,
+        [&](std::size_t threadIndex)
+        {
+            std::size_t startGroupIndex = threadIndex * (triangleGroupCount / setupThreadCount);
+            std::size_t endGroupIndex = (threadIndex + 1) * (triangleGroupCount / setupThreadCount);
+            if(endGroupIndex > triangleGroupCount)
+                endGroupIndex = triangleGroupCount;
+            renderStates[threadIndex].reserve(endGroupIndex - startGroupIndex);
+            for(std::size_t groupIndex = startGroupIndex; groupIndex < endGroupIndex; groupIndex++)
+            {
+                Vector4FList p1, p2, p3;
+                TriangleRenderState::Colors colors;
+                std::size_t currentTriangleCount = triangleCount - ValueListSize * groupIndex;
+                if(currentTriangleCount > ValueListSize)
+                    currentTriangleCount = ValueListSize;
+                for(std::size_t i = 0; i < currentTriangleCount; i++)
+                {
+                    p1.x[i] = triangles[i + groupIndex * ValueListSize].p1.x[0];
+                    p1.y[i] = triangles[i + groupIndex * ValueListSize].p1.y[0];
+                    p1.z[i] = triangles[i + groupIndex * ValueListSize].p1.z[0];
+                    p1.w[i] = triangles[i + groupIndex * ValueListSize].p1.w[0];
+                    p2.x[i] = triangles[i + groupIndex * ValueListSize].p2.x[0];
+                    p2.y[i] = triangles[i + groupIndex * ValueListSize].p2.y[0];
+                    p2.z[i] = triangles[i + groupIndex * ValueListSize].p2.z[0];
+                    p2.w[i] = triangles[i + groupIndex * ValueListSize].p2.w[0];
+                    p3.x[i] = triangles[i + groupIndex * ValueListSize].p3.x[0];
+                    p3.y[i] = triangles[i + groupIndex * ValueListSize].p3.y[0];
+                    p3.z[i] = triangles[i + groupIndex * ValueListSize].p3.z[0];
+                    p3.w[i] = triangles[i + groupIndex * ValueListSize].p3.w[0];
+                    colors.colors[i] = triangles[i + groupIndex * ValueListSize].color;
+                }
+                p1 = tform.apply(p1);
+                p2 = tform.apply(p2);
+                p3 = tform.apply(p3);
+                renderStates[threadIndex].emplace_back(colorImage,
+                                                       depthImage,
+                                                       p1,
+                                                       p2,
+                                                       p3,
+                                                       colors,
+                                                       currentTriangleCount,
+                                                       0,
+                                                       0,
+                                                       colorImage.getWidth(),
+                                                       colorImage.getHeight());
+                if(!renderStates[threadIndex].back().good)
+                    renderStates[threadIndex].pop_back();
+            }
+        });
+    std::size_t chunkXCount = (colorImage.getWidth() + ChunkLevel<MaxChunkLevel>::totalWidth - 1)
+                              / ChunkLevel<MaxChunkLevel>::totalWidth;
+    std::size_t chunkYCount = (colorImage.getHeight() + ChunkLevel<MaxChunkLevel>::totalHeight - 1)
+                              / ChunkLevel<MaxChunkLevel>::totalHeight;
+    std::size_t chunkCount = chunkXCount * chunkYCount;
+    std::size_t renderThreadCount = triangleCount * chunkCount;
+    if(renderThreadCount == 0)
+        renderThreadCount = 1;
+    if(renderThreadCount > chunkCount)
+        renderThreadCount = chunkCount;
+    if(renderThreadCount > maxParallelism)
+        renderThreadCount = maxParallelism;
+    runInThreads(
+        threadedTaskRunner,
+        renderThreadCount,
+        [&](std::size_t threadIndex)
+        {
+            for(std::size_t chunkIndex = threadIndex; chunkIndex < chunkCount;
+                chunkIndex += renderThreadCount)
+            {
+                std::size_t x = (chunkIndex % chunkXCount) * ChunkLevel<MaxChunkLevel>::totalWidth;
+                std::size_t y = (chunkIndex / chunkXCount) * ChunkLevel<MaxChunkLevel>::totalHeight;
+                for(auto &renderStateGroup : renderStates)
+                {
+                    for(auto &renderState : renderStateGroup)
+                    {
+                        for(std::size_t triangleIndex = 0;
+                            triangleIndex < renderState.triangleCount;
+                            triangleIndex++)
+                        {
+                            if(renderState.drawTriangleMask[triangleIndex])
+                            {
+                                RenderTriangleHelper<MaxChunkLevel,
+                                                     true,
+                                                     true,
+                                                     true,
+                                                     false,
+                                                     true,
+                                                     false,
+                                                     true>::
+                                    run(renderState,
+                                        triangleIndex,
+                                        x,
+                                        y,
+                                        renderState.edgeEquationXSteps[0][triangleIndex] * x
+                                            + renderState.edgeEquationYSteps[0][triangleIndex] * y
+                                            + renderState.edgeEquationConstants[0][triangleIndex],
+                                        renderState.edgeEquationXSteps[1][triangleIndex] * x
+                                            + renderState.edgeEquationYSteps[1][triangleIndex] * y
+                                            + renderState.edgeEquationConstants[1][triangleIndex],
+                                        renderState.edgeEquationXSteps[2][triangleIndex] * x
+                                            + renderState.edgeEquationYSteps[2][triangleIndex] * y
+                                            + renderState.edgeEquationConstants[2][triangleIndex]);
+                            }
+                        }
+                    }
+                }
+            }
+        });
 }
 
 Vector4F getPoint(float u, float v)
@@ -916,13 +983,7 @@ Vector4F getPointNormal(float u, float v)
     return Vector4F(std::sin(u) * std::sin(v), std::cos(v), std::cos(u) * std::sin(v), 0);
 }
 
-void getTriangle(std::size_t triangleIndex,
-                 std::size_t uCount,
-                 std::size_t vCount,
-                 Color &color,
-                 Vector4F &p1,
-                 Vector4F &p2,
-                 Vector4F &p3)
+Triangle getTriangle(std::size_t triangleIndex, std::size_t uCount, std::size_t vCount)
 {
     bool isSecondPartOfQuad = triangleIndex % 2;
     triangleIndex /= 2;
@@ -930,17 +991,18 @@ void getTriangle(std::size_t triangleIndex,
     float v0 = static_cast<float>(triangleIndex / uCount) / vCount;
     float u1 = static_cast<float>(triangleIndex % uCount + 1) / uCount;
     float v1 = static_cast<float>(triangleIndex / uCount + 1) / vCount;
+    Triangle retval;
     if(isSecondPartOfQuad)
     {
-        p1 = getPoint(u0, v0);
-        p2 = getPoint(u1, v0);
-        p3 = getPoint(u1, v1);
+        retval.p1 = getPoint(u0, v0);
+        retval.p2 = getPoint(u1, v0);
+        retval.p3 = getPoint(u1, v1);
     }
     else
     {
-        p1 = getPoint(u0, v0);
-        p2 = getPoint(u1, v1);
-        p3 = getPoint(u0, v1);
+        retval.p1 = getPoint(u0, v0);
+        retval.p2 = getPoint(u1, v1);
+        retval.p3 = getPoint(u0, v1);
     }
     Vector4F normal = getPointNormal(0.5f * (u0 + u1), 0.5f * (v0 + v1));
     normal /= Vector4F(normal.abs());
@@ -979,34 +1041,16 @@ void getTriangle(std::size_t triangleIndex,
     colorI32.y = select(colorI32.y > maxV, maxV, colorI32.y);
     colorI32.z = select(colorI32.z > maxV, maxV, colorI32.z);
     colorI32.w = select(colorI32.w > maxV, maxV, colorI32.w);
-    color = static_cast<Color>(colorI32);
+    retval.color = static_cast<Color>(colorI32);
+    return retval;
 }
 
-void renderFrame(ColorImage &colorImage, DepthImage &depthImage)
+void renderFrame(ColorImage &colorImage,
+                 DepthImage &depthImage,
+                 ThreadedTaskRunner &threadedTaskRunner)
 {
-    clearImage(colorImage, 0, {0x20, 0x20, 0x20, 0xFF});
+    clearImage(colorImage, 0, {0x80, 0xC0, 0xFF, 0xFF});
     clearImage(depthImage, 0, INFINITY);
-#if 0
-    Matrix4x4 tform(colorImage.getWidth() / 2.0f,
-                    0,
-                    0,
-                    colorImage.getWidth() / 2.0f,
-                    0,
-                    colorImage.getHeight() / -2.0f,
-                    0,
-                    colorImage.getHeight() / 2.0f,
-                    0,
-                    0,
-                    0.5f,
-                    0.5f);
-    renderTriangles(colorImage,
-                    depthImage,
-                    tform.apply(Vector4FList(1, -1, 0, 1)),
-                    tform.apply(Vector4FList(-1, -1, 0, 1)),
-                    tform.apply(Vector4FList(0, 1, 0, 1)),
-                    TriangleRenderState::Colors(Vector4FList(1)),
-                    1);
-#else
     double currentTime = std::chrono::duration_cast<std::chrono::duration<double>>(
                              std::chrono::steady_clock::now().time_since_epoch()).count();
     Matrix4x4 tform;
@@ -1041,62 +1085,34 @@ void renderFrame(ColorImage &colorImage, DepthImage &depthImage)
                                    0,
                                    0.5f,
                                    0.5f));
-    std::size_t uCount = 10;
-    std::size_t vCount = 5;
+    std::size_t uCount = 20;
+    std::size_t vCount = 20;
     std::size_t triangleCount = uCount * vCount * 2;
-    for(std::size_t triangleIndex = 0; triangleIndex < triangleCount;
-        triangleIndex += ValueListSize)
+    std::vector<Triangle> triangles;
+    triangles.reserve(triangleCount);
+    bool reverseTriangles = std::fmod(currentTime, 10) < 2;
+    for(std::size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
     {
-        TriangleRenderState::Colors colors;
-        Vector4FList p1, p2, p3;
-        std::size_t triangleRenderCount = triangleCount - triangleIndex;
-        if(triangleRenderCount > ValueListSize)
-            triangleRenderCount = ValueListSize;
-        for(std::size_t i = 0; i < triangleRenderCount; i++)
+        Vector4F currentP1, currentP2, currentP3;
+        triangles.push_back(getTriangle(triangleIndex, uCount, vCount));
+        if(reverseTriangles)
         {
-            Vector4F currentP1, currentP2, currentP3;
-            getTriangle(triangleIndex + i,
-                        uCount,
-                        vCount,
-                        colors.colors[i],
-                        currentP1,
-                        currentP2,
-                        currentP3);
-            p1.x[i] = currentP1.x[0];
-            p1.y[i] = currentP1.y[0];
-            p1.z[i] = currentP1.z[0];
-            p1.w[i] = currentP1.w[0];
-            p2.x[i] = currentP2.x[0];
-            p2.y[i] = currentP2.y[0];
-            p2.z[i] = currentP2.z[0];
-            p2.w[i] = currentP2.w[0];
-            p3.x[i] = currentP3.x[0];
-            p3.y[i] = currentP3.y[0];
-            p3.z[i] = currentP3.z[0];
-            p3.w[i] = currentP3.w[0];
+            auto temp = triangles.back().p1;
+            triangles.back().p1 = triangles.back().p2;
+            triangles.back().p2 = temp;
         }
-        if(std::fmod(currentTime, 10) < 2)
-        {
-            auto temp = p1;
-            p1 = p2;
-            p2 = temp;
-        }
-        renderTriangles(colorImage,
-                        depthImage,
-                        tform.apply(p1),
-                        tform.apply(p2),
-                        tform.apply(p3),
-                        colors,
-                        triangleRenderCount);
     }
-#endif
+    renderTriangles(
+        colorImage, depthImage, triangles.data(), triangles.size(), tform, threadedTaskRunner);
 }
+
 
 int main()
 {
-    constexpr std::size_t width = 1920, height = 1080;
-    ColorImage colorImage(width, height, 1);
-    DepthImage depthImage(width, height, 1);
+    std::size_t initialWidth = 16, initialHeight = 9;
+    ColorImage colorImage(initialWidth, initialHeight, 1);
+    DepthImage depthImage(initialWidth, initialHeight, 1);
+    ThreadedTaskRunner threadedTaskRunner{};
     if(SDL_Init(SDL_INIT_VIDEO) != 0)
     {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
@@ -1104,19 +1120,21 @@ int main()
     }
     SDL_Window *window = nullptr;
     SDL_Renderer *renderer = nullptr;
-    if(SDL_CreateWindowAndRenderer(width, height, 0, &window, &renderer) != 0)
+    if(SDL_CreateWindowAndRenderer(
+           initialWidth, initialHeight, SDL_WINDOW_RESIZABLE, &window, &renderer) != 0)
     {
         std::cerr << "SDL_CreateWindowAndRenderer failed: " << SDL_GetError() << std::endl;
         SDL_Quit();
         return 1;
     }
+    SDL_SetWindowMinimumSize(window, 1, 1);
 #if SDL_BYTEORDER == SDL_BIG_ENDIAN
     constexpr auto pixelFormat = SDL_PIXELFORMAT_RGBA8888;
 #else
     constexpr auto pixelFormat = SDL_PIXELFORMAT_ABGR8888;
 #endif
-    SDL_Texture *texture =
-        SDL_CreateTexture(renderer, pixelFormat, SDL_TEXTUREACCESS_STREAMING, width, height);
+    SDL_Texture *texture = SDL_CreateTexture(
+        renderer, pixelFormat, SDL_TEXTUREACCESS_STREAMING, initialWidth, initialHeight);
     if(!texture)
     {
         std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << std::endl;
@@ -1125,10 +1143,46 @@ int main()
         SDL_Quit();
         return 1;
     }
+    auto lastFPSReportTime = std::chrono::steady_clock::now();
+    std::size_t framesSinceLastFPSReport = 0;
     bool done = false;
     while(!done)
     {
-        renderFrame(colorImage, depthImage);
+        int w, h;
+        SDL_GetWindowSize(window, &w, &h);
+        std::size_t width = w, height = h;
+        if(width != colorImage.getWidth() || height != colorImage.getHeight())
+        {
+            colorImage = ColorImage();
+            depthImage = DepthImage();
+            colorImage = ColorImage(width, height, 1);
+            depthImage = DepthImage(width, height, 1);
+            SDL_DestroyTexture(texture);
+            texture = SDL_CreateTexture(
+                renderer, pixelFormat, SDL_TEXTUREACCESS_STREAMING, width, height);
+            if(!texture)
+            {
+                std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << std::endl;
+                SDL_DestroyRenderer(renderer);
+                SDL_DestroyWindow(window);
+                SDL_Quit();
+                return 1;
+            }
+        }
+        renderFrame(colorImage, depthImage, threadedTaskRunner);
+        framesSinceLastFPSReport++;
+        auto currentTime = std::chrono::steady_clock::now();
+        if(currentTime - std::chrono::seconds(1) >= lastFPSReportTime)
+        {
+            float elapsedTime = std::chrono::duration_cast<std::chrono::duration<float>>(
+                                    currentTime - lastFPSReportTime).count();
+            lastFPSReportTime = currentTime;
+            std::ostringstream ss;
+            ss << "FPS: " << framesSinceLastFPSReport / elapsedTime;
+            framesSinceLastFPSReport = 0;
+            std::cout << ss.str() << std::endl;
+            SDL_SetWindowTitle(window, ss.str().c_str());
+        }
         void *pixels = nullptr;
         int pitch = 0;
         if(SDL_LockTexture(texture, nullptr, &pixels, &pitch) != 0)

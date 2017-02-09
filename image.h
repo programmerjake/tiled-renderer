@@ -24,6 +24,7 @@
 
 #include "value_list.h"
 #include "vector_list.h"
+#include "rasterize_chunk.h"
 #include <memory>
 #include <new>
 #include <type_traits>
@@ -43,24 +44,55 @@ private:
     };
 
 private:
-    std::size_t width, height, layers;
+    std::size_t width, xChunkCount, height, yChunkCount, layers;
     std::shared_ptr<T> elements;
+    static constexpr std::size_t getXChunkCount(std::size_t width) noexcept
+    {
+        return (width + ChunkLevel<MaxChunkLevel>::totalWidth - 1)
+               / ChunkLevel<MaxChunkLevel>::totalWidth;
+    }
+    static constexpr std::size_t getYChunkCount(std::size_t height) noexcept
+    {
+        return (height + ChunkLevel<MaxChunkLevel>::totalHeight - 1)
+               / ChunkLevel<MaxChunkLevel>::totalHeight;
+    }
     std::size_t getIndex(std::size_t x, std::size_t y, std::size_t layer) const noexcept
     {
-        return x + width * (y + height * layer);
+        std::size_t xChunk = x / ChunkLevel<MaxChunkLevel>::totalWidth;
+        std::size_t yChunk = y / ChunkLevel<MaxChunkLevel>::totalHeight;
+        x %= ChunkLevel<MaxChunkLevel>::totalWidth;
+        y %= ChunkLevel<MaxChunkLevel>::totalHeight;
+        return x
+               + ChunkLevel<MaxChunkLevel>::totalWidth
+                     * (y
+                        + ChunkLevel<MaxChunkLevel>::totalHeight
+                              * (xChunk + xChunkCount * (yChunk + yChunkCount * layer)));
     }
 
 public:
-    constexpr Image() noexcept : width(0), height(0), layers(0), elements(nullptr)
+    constexpr Image() noexcept : width(0),
+                                 xChunkCount(0),
+                                 height(0),
+                                 yChunkCount(0),
+                                 layers(0),
+                                 elements(nullptr)
     {
     }
     explicit Image(std::size_t width, std::size_t height, std::size_t layers)
-        : width(width), height(height), layers(layers), elements()
+        : width(width),
+          xChunkCount(getXChunkCount(width)),
+          height(height),
+          yChunkCount(getYChunkCount(height)),
+          layers(layers),
+          elements()
     {
         if(width != 0 && height != 0 && layers != 0)
         {
-            std::size_t elementCount = width * height * layers;
-            if(elementCount / width / height != layers) // if the multiplication overflowed
+            std::size_t chunkSize =
+                ChunkLevel<MaxChunkLevel>::totalWidth * ChunkLevel<MaxChunkLevel>::totalHeight;
+            std::size_t elementCount = chunkSize * xChunkCount * yChunkCount * layers;
+            if(elementCount / chunkSize / xChunkCount / yChunkCount
+               != layers) // if the multiplication overflowed
                 throw std::bad_alloc();
             elements = std::shared_ptr<T>(new T[elementCount](), DeleteArray());
         }

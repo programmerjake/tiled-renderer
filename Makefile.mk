@@ -6,14 +6,14 @@ SDL_CFLAGS := $(shell sdl2-config --cflags)
 SDL_LIBS := $(shell sdl2-config --libs)
 
 $(BUILD_DIR)/%.o: %.cpp
-	mkdir -p $(BUILD_DIR) && clang++ -stdlib=libc++ -c -std=c++11 -O2 -g $(SDL_CFLAGS) $< -o $@
+	mkdir -p $(BUILD_DIR) && clang++ -pthread -stdlib=libc++ -c -std=c++11 -O3 -g $(SDL_CFLAGS) $< -o $@
 
 OBJECT_FILES += $(BUILD_DIR)/main.o
 
 $(BUILD_DIR)/main.o: main.cpp image.h matrix_list.h value_list.h vector_list.h
 
 $(OUTPUT_FILE): $(OBJECT_FILES)
-	clang++ -stdlib=libc++ $(SDL_LIBS) -msse4 $+ -o $@
+	clang++ -pthread -stdlib=libc++ $(SDL_LIBS) -msse4 $+ -o $@
 
 all: $(OUTPUT_FILE)
 
