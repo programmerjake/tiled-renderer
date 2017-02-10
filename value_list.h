@@ -30,7 +30,7 @@
 
 namespace tiled_renderer
 {
-constexpr std::size_t Log2ValueListSize = 4;
+constexpr std::size_t Log2ValueListSize = 3;
 constexpr std::size_t ValueListSize = static_cast<std::size_t>(1) << Log2ValueListSize;
 
 template <std::size_t BitCount>

@@ -36,6 +36,7 @@
 #include <memory>
 #include <deque>
 #include <sstream>
+#include <cstring>
 #include "SDL.h"
 
 using namespace tiled_renderer;
@@ -73,19 +74,6 @@ void writeImage(const std::string &fileName, const ColorImage &image)
     }
 }
 
-template <typename T>
-void clearImage(Image<T> &image, std::size_t layer, T clearColor) noexcept
-{
-    assert(layer < image.getLayers());
-    for(std::size_t y = 0; y < image.getHeight(); y++)
-    {
-        for(std::size_t x = 0; x < image.getWidth(); x++)
-        {
-            image.setElementUnchecked(x, y, layer, clearColor);
-        }
-    }
-}
-
 template <std::size_t...>
 struct LevelList final
 {
@@ -104,7 +92,9 @@ struct MakeLevelList final
     typedef typename MakeLevelList<Level - 1, Level, Levels...>::type type;
 };
 
-constexpr std::size_t EdgeEquationFractionalBits = 18;
+constexpr std::size_t EdgeEquationFractionalBits = 14;
+constexpr std::size_t PositionFractionalBits = 2;
+constexpr std::size_t WFractionalBits = 9;
 
 struct TriangleRenderState final
 {
@@ -156,8 +146,6 @@ struct TriangleRenderState final
     I32List edgeEquationConstants[3];
     I32List edgeEquationXSteps[3];
     I32List edgeEquationYSteps[3];
-    Bool32List trivialReject;
-    Bool32List trivialAccepts[3];
     const std::int32_t scissorX;
     const std::int32_t scissorY;
     const std::int32_t scissorWidth;
@@ -185,8 +173,6 @@ struct TriangleRenderState final
                                                                edgeEquationConstants{},
                                                                edgeEquationXSteps{},
                                                                edgeEquationYSteps{},
-                                                               trivialReject(false),
-                                                               trivialAccepts{},
                                                                scissorX(scissorX),
                                                                scissorY(scissorY),
                                                                scissorWidth(scissorWidth),
@@ -251,10 +237,29 @@ private:
         Bool32List triangleCountMask(true);
         for(std::size_t i = triangleCount; i < ValueListSize; i++)
             triangleCountMask[i] = false;
-        FloatList signedArea =
-            (triangleP1.w * triangleP2.x - triangleP2.w * triangleP1.x) * triangleP3.y
-            + (triangleP3.w * triangleP1.x - triangleP1.w * triangleP3.x) * triangleP2.y
-            + (triangleP2.w * triangleP3.x - triangleP3.w * triangleP2.x) * triangleP1.y;
+        float intPositionScale = static_cast<std::uint64_t>(1) << PositionFractionalBits;
+        float intWScale = static_cast<std::uint64_t>(1) << WFractionalBits;
+        I32List intPX[3] = {
+            static_cast<I32List>(triangleP1.x * FloatList(intPositionScale)),
+            static_cast<I32List>(triangleP2.x * FloatList(intPositionScale)),
+            static_cast<I32List>(triangleP3.x * FloatList(intPositionScale)),
+        };
+        I32List intPY[3] = {
+            static_cast<I32List>(triangleP1.y * FloatList(intPositionScale)),
+            static_cast<I32List>(triangleP2.y * FloatList(intPositionScale)),
+            static_cast<I32List>(triangleP3.y * FloatList(intPositionScale)),
+        };
+        I32List intPW[3] = {
+            static_cast<I32List>(triangleP1.w * FloatList(intWScale)),
+            static_cast<I32List>(triangleP2.w * FloatList(intWScale)),
+            static_cast<I32List>(triangleP3.w * FloatList(intWScale)),
+        };
+        FloatList signedArea = static_cast<FloatList>(intPW[0] * intPX[1] - intPW[1] * intPX[0])
+                                   * static_cast<FloatList>(intPY[2])
+                               + static_cast<FloatList>(intPW[2] * intPX[0] - intPW[0] * intPX[2])
+                                     * static_cast<FloatList>(intPY[1])
+                               + static_cast<FloatList>(intPW[1] * intPX[2] - intPW[2] * intPX[1])
+                                     * static_cast<FloatList>(intPY[0]);
         drawTriangleMask &= signedArea > FloatList(0);
         drawTriangleMask &= triangleCountMask;
         if(!reduce(
@@ -264,72 +269,45 @@ private:
                },
                drawTriangleMask))
             return false;
-        FloatList edgeEquationConstantsF[3] = {
-            triangleP2.x * triangleP3.y - triangleP3.x * triangleP2.y,
-            triangleP3.x * triangleP1.y - triangleP1.x * triangleP3.y,
-            triangleP1.x * triangleP2.y - triangleP2.x * triangleP1.y,
-        };
-        FloatList edgeEquationXStepsF[3] = {
-            triangleP2.y * triangleP3.w - triangleP3.y * triangleP2.w,
-            triangleP3.y * triangleP1.w - triangleP1.y * triangleP3.w,
-            triangleP1.y * triangleP2.w - triangleP2.y * triangleP1.w,
-        };
-        FloatList edgeEquationYStepsF[3] = {
-            triangleP3.x * triangleP2.w - triangleP2.x * triangleP3.w,
-            triangleP1.x * triangleP3.w - triangleP3.x * triangleP1.w,
-            triangleP2.x * triangleP1.w - triangleP1.x * triangleP2.w,
-        };
-        FloatList edgeEquationSigns[3] = {
-            signedArea * triangleP1.w, signedArea * triangleP2.w, signedArea * triangleP3.w,
-        };
         for(std::size_t i = 0; i < 3; i++)
         {
-            FloatList scaleFactor = map(
-                [](float a, float b) -> float
-                {
-                    return static_cast<float>(static_cast<std::uint64_t>(1)
-                                              << EdgeEquationFractionalBits)
-                           / (std::fabs(a) + std::fabs(b));
-                },
-                edgeEquationXStepsF[i],
-                edgeEquationYStepsF[i]);
-            scaleFactor = select(edgeEquationSigns[i] > 0, scaleFactor, -scaleFactor);
-            edgeEquationConstantsF[i] *= scaleFactor;
-            edgeEquationXStepsF[i] *= scaleFactor;
-            edgeEquationYStepsF[i] *= scaleFactor;
+            static_assert(WFractionalBits >= PositionFractionalBits, "");
+            edgeEquationConstants[i] =
+                (intPX[(i + 1) % 3] * intPY[(i + 2) % 3] - intPX[(i + 2) % 3] * intPY[(i + 1) % 3])
+                << I32List(WFractionalBits - PositionFractionalBits);
+            edgeEquationXSteps[i] =
+                intPY[(i + 1) % 3] * intPW[(i + 2) % 3] - intPY[(i + 2) % 3] * intPW[(i + 1) % 3];
+            edgeEquationYSteps[i] =
+                intPX[(i + 2) % 3] * intPW[(i + 1) % 3] - intPX[(i + 1) % 3] * intPW[(i + 2) % 3];
+            edgeEquationConstants[i] =
+                select(signedArea < 0, edgeEquationConstants[i], -edgeEquationConstants[i]);
+            edgeEquationXSteps[i] =
+                select(signedArea < 0, edgeEquationXSteps[i], -edgeEquationXSteps[i]);
+            edgeEquationYSteps[i] =
+                select(signedArea < 0, edgeEquationYSteps[i], -edgeEquationYSteps[i]);
+
+            // handle top-left fill rule
+            Bool32List isNonTopEdge = (edgeEquationXSteps[i] != 0) | (edgeEquationYSteps[i] <= 0);
+            Bool32List isNonLeftEdge = edgeEquationXSteps[i] <= 0;
+            edgeEquationConstants[i] += reinterpret<std::int32_t>(isNonTopEdge & isNonLeftEdge);
         }
-        FloatList edgeEquationTrivialRejectX[3] = {};
-        FloatList edgeEquationTrivialRejectY[3] = {};
-        FloatList edgeEquationTrivialAcceptX[3] = {};
-        FloatList edgeEquationTrivialAcceptY[3] = {};
+        I32List edgeEquationTrivialRejectX[3] = {};
+        I32List edgeEquationTrivialRejectY[3] = {};
         for(std::size_t i = 0; i < 3; i++)
         {
-            auto compareResultX = edgeEquationXStepsF[i] > 0;
-            auto compareResultY = edgeEquationYStepsF[i] > 0;
             edgeEquationTrivialRejectX[i] =
-                select(compareResultX, FloatList(colorImage.getWidth() + 1), FloatList(-1.0f));
+                select(edgeEquationXSteps[i] > 0, I32List(colorImage.getWidth() - 1), I32List(0));
             edgeEquationTrivialRejectY[i] =
-                select(compareResultY, FloatList(colorImage.getHeight() + 1), FloatList(-1.0f));
-            edgeEquationTrivialAcceptX[i] =
-                select(compareResultX, FloatList(-1.0f), FloatList(colorImage.getWidth() + 1));
-            edgeEquationTrivialAcceptY[i] =
-                select(compareResultY, FloatList(-1.0f), FloatList(colorImage.getHeight() + 1));
+                select(edgeEquationYSteps[i] > 0, I32List(colorImage.getHeight() - 1), I32List(0));
         }
-        trivialReject = Bool32List(false);
-        Bool32List trivialAccept = drawTriangleMask;
+        Bool32List trivialReject(false);
         for(std::size_t i = 0; i < 3; i++)
         {
-            trivialReject |= !checkEdgeEquationList(edgeEquationConstantsF[i],
-                                                    edgeEquationXStepsF[i],
-                                                    edgeEquationYStepsF[i],
+            trivialReject |= !checkEdgeEquationList(edgeEquationConstants[i],
+                                                    edgeEquationXSteps[i],
+                                                    edgeEquationYSteps[i],
                                                     edgeEquationTrivialRejectX[i],
                                                     edgeEquationTrivialRejectY[i]);
-            trivialAccepts[i] = checkEdgeEquationList(edgeEquationConstantsF[i],
-                                                      edgeEquationXStepsF[i],
-                                                      edgeEquationYStepsF[i],
-                                                      edgeEquationTrivialAcceptX[i],
-                                                      edgeEquationTrivialAcceptY[i]);
-            trivialAccept &= trivialAccepts[i];
         }
         drawTriangleMask &= !trivialReject;
         drawTriangleMask &= triangleCountMask;
@@ -340,28 +318,8 @@ private:
                },
                drawTriangleMask))
             return false;
-        trivialAccept |= !triangleCountMask;
-        if(reduce(
-               [](Bool32 a, Bool32 b)
-               {
-                   return a & b;
-               },
-               trivialAccept))
-            return true;
-        for(std::size_t i = 0; i < 3; i++)
-            edgeEquationXSteps[i] = static_cast<I32List>(edgeEquationXStepsF[i]);
-        for(std::size_t i = 0; i < 3; i++)
-            edgeEquationYSteps[i] = static_cast<I32List>(edgeEquationYStepsF[i]);
-        for(std::size_t i = 0; i < 3; i++)
-        {
-            edgeEquationConstants[i] = static_cast<I32List>(edgeEquationConstantsF[i]);
-            // handle top-left fill rule
-            Bool32List isNonTopEdge = (edgeEquationXSteps[i] != 0) | (edgeEquationYSteps[i] <= 0);
-            Bool32List isNonLeftEdge = edgeEquationXSteps[i] <= 0;
-            edgeEquationConstants[i] += reinterpret<std::int32_t>(isNonTopEdge & isNonLeftEdge);
-        }
         for(std::size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
-            if(drawTriangleMask[triangleIndex] & !trivialAccept[triangleIndex])
+            if(drawTriangleMask[triangleIndex])
                 fillAllPerLevelStates(
                     triangleIndex,
                     static_cast<const MakeLevelList<MaxChunkLevel>::type *>(nullptr));
@@ -704,11 +662,13 @@ struct ThreadedTaskRunner final
 {
     ThreadedTaskRunner(const ThreadedTaskRunner &) = delete;
     ThreadedTaskRunner &operator=(const ThreadedTaskRunner &) = delete;
+    struct Task;
     struct Fence final
     {
         std::mutex lock;
         std::condition_variable cond;
         std::size_t scheduledTaskCount;
+        std::unique_ptr<std::vector<std::shared_ptr<Task>>> waitingTasks;
         void waitForCompletion()
         {
             std::unique_lock<std::mutex> lockIt(lock);
@@ -722,18 +682,48 @@ struct ThreadedTaskRunner final
             std::unique_lock<std::mutex> lockIt(lock);
             scheduledTaskCount++;
         }
-        void taskFinished()
+        bool tryAddWaitingTask(std::shared_ptr<Task> &&waitingTask)
+        {
+            std::unique_lock<std::mutex> lockIt(lock);
+            if(scheduledTaskCount > 0)
+            {
+                if(!waitingTasks)
+                    waitingTasks.reset(new std::vector<std::shared_ptr<Task>>);
+                waitingTasks->push_back(std::move(waitingTask));
+                return true;
+            }
+            return false;
+        }
+        bool tryAddWaitingTask(const std::shared_ptr<Task> &waitingTask)
+        {
+            std::unique_lock<std::mutex> lockIt(lock);
+            if(scheduledTaskCount > 0)
+            {
+                if(!waitingTasks)
+                    waitingTasks.reset(new std::vector<std::shared_ptr<Task>>);
+                waitingTasks->push_back(waitingTask);
+                return true;
+            }
+            return false;
+        }
+        std::unique_ptr<std::vector<std::shared_ptr<Task>>> signalTaskFinishedAndGetWaitingTasks()
         {
             std::unique_lock<std::mutex> lockIt(lock);
             scheduledTaskCount--;
             if(scheduledTaskCount == 0)
+            {
                 cond.notify_all();
+                return std::move(waitingTasks);
+            }
+            return std::unique_ptr<std::vector<std::shared_ptr<Task>>>();
         }
     };
     struct Task
     {
-        std::shared_ptr<Fence> fence;
-        explicit Task(std::shared_ptr<Fence> fence) : fence(fence)
+        std::shared_ptr<Fence> signalFence;
+        std::shared_ptr<Fence> waitFence;
+        explicit Task(std::shared_ptr<Fence> signalFence, std::shared_ptr<Fence> waitFence)
+            : signalFence(std::move(signalFence)), waitFence(std::move(waitFence))
         {
         }
         virtual ~Task() = default;
@@ -745,6 +735,31 @@ struct ThreadedTaskRunner final
     bool done = false;
     std::deque<std::shared_ptr<Task>> tasks;
     std::size_t waitingThreadCount = 0;
+    void runTasks(std::unique_lock<std::mutex> &lockIt) noexcept
+    {
+        while(true)
+        {
+            if(tasks.empty())
+                return;
+            auto task = std::move(tasks.front());
+            tasks.pop_front();
+            lockIt.unlock();
+            task->run();
+            std::unique_ptr<std::vector<std::shared_ptr<Task>>> newTasks;
+            if(task->signalFence)
+            {
+                newTasks = task->signalFence->signalTaskFinishedAndGetWaitingTasks();
+            }
+            lockIt.lock();
+            if(newTasks)
+            {
+                for(auto &i : *newTasks)
+                {
+                    addNonwaitingTask(std::move(i), lockIt);
+                }
+            }
+        }
+    }
     void threadFn() noexcept
     {
         std::unique_lock<std::mutex> lockIt(lock);
@@ -752,20 +767,10 @@ struct ThreadedTaskRunner final
         {
             if(done)
                 break;
-            if(tasks.empty())
-            {
-                waitingThreadCount++;
-                cond.wait(lockIt);
-                waitingThreadCount--;
-                continue;
-            }
-            auto task = std::move(tasks.front());
-            tasks.pop_front();
-            lockIt.unlock();
-            task->run();
-            if(task->fence)
-                task->fence->taskFinished();
-            lockIt.lock();
+            runTasks(lockIt);
+            waitingThreadCount++;
+            cond.wait(lockIt);
+            waitingThreadCount--;
         }
     }
     ~ThreadedTaskRunner()
@@ -788,20 +793,27 @@ struct ThreadedTaskRunner final
                                  });
         }
     }
-    void addTask(std::shared_ptr<Task> task)
+    void addNonwaitingTask(std::shared_ptr<Task> task, std::unique_lock<std::mutex> &lockIt)
     {
-        assert(task);
-        if(threads.empty())
-        {
-            task->run();
-            return;
-        }
-        if(task->fence)
-            task->fence->addTask();
-        std::unique_lock<std::mutex> lockIt(lock);
         tasks.push_back(std::move(task));
         if(waitingThreadCount != 0)
             cond.notify_one();
+    }
+    void addTask(std::shared_ptr<Task> task)
+    {
+        assert(task);
+        if(task->signalFence)
+            task->signalFence->addTask();
+        if(task->waitFence)
+        {
+            auto waitFence = task->waitFence;
+            if(waitFence->tryAddWaitingTask(std::move(task)))
+                return;
+        }
+        std::unique_lock<std::mutex> lockIt(lock);
+        addNonwaitingTask(std::move(task), lockIt);
+        if(threads.empty())
+            runTasks(lockIt);
     }
     std::size_t getParallelism() const noexcept
     {
@@ -810,20 +822,26 @@ struct ThreadedTaskRunner final
 };
 
 template <typename Fn>
-void runInThreads(ThreadedTaskRunner &threadedTaskRunner, std::size_t threadCount, Fn fn)
+void runInThreads(ThreadedTaskRunner &threadedTaskRunner,
+                  std::shared_ptr<ThreadedTaskRunner::Fence> signalFence,
+                  std::shared_ptr<ThreadedTaskRunner::Fence> waitFence,
+                  std::size_t threadCount,
+                  Fn fn)
 {
     assert(threadCount != 0);
-    auto fence = std::make_shared<ThreadedTaskRunner::Fence>();
     for(std::size_t i = 0; i < threadCount; i++)
     {
         struct MyTask final : public ThreadedTaskRunner::Task
         {
             const std::size_t threadIndex;
             Fn fn;
-            explicit MyTask(std::shared_ptr<ThreadedTaskRunner::Fence> fence,
+            explicit MyTask(std::shared_ptr<ThreadedTaskRunner::Fence> signalFence,
+                            std::shared_ptr<ThreadedTaskRunner::Fence> waitFence,
                             std::size_t threadIndex,
                             Fn fn)
-                : Task(std::move(fence)), threadIndex(threadIndex), fn(std::move(fn))
+                : Task(std::move(signalFence), std::move(waitFence)),
+                  threadIndex(threadIndex),
+                  fn(std::move(fn))
             {
             }
             virtual void run() noexcept override
@@ -831,9 +849,8 @@ void runInThreads(ThreadedTaskRunner &threadedTaskRunner, std::size_t threadCoun
                 fn(threadIndex);
             }
         };
-        threadedTaskRunner.addTask(std::make_shared<MyTask>(fence, i, fn));
+        threadedTaskRunner.addTask(std::make_shared<MyTask>(signalFence, waitFence, i, fn));
     }
-    fence->waitForCompletion();
 }
 
 void renderTriangles(ColorImage &colorImage,
@@ -841,32 +858,56 @@ void renderTriangles(ColorImage &colorImage,
                      const Triangle *const triangles,
                      const std::size_t triangleCount,
                      Matrix4x4 tform,
-                     ThreadedTaskRunner &threadedTaskRunner) noexcept
+                     ThreadedTaskRunner &threadedTaskRunner,
+                     std::shared_ptr<ThreadedTaskRunner::Fence> signalFence,
+                     std::shared_ptr<ThreadedTaskRunner::Fence> waitFence) noexcept
 {
     assert(colorImage.getWidth() == depthImage.getWidth()
            && colorImage.getHeight() == depthImage.getHeight());
     if(colorImage.getWidth() == 0 || colorImage.getHeight() == 0 || triangleCount == 0)
+    {
+        runInThreads(threadedTaskRunner,
+                     signalFence,
+                     waitFence,
+                     1,
+                     [](std::size_t)
+                     {
+                     }); // connect the fences
         return;
+    }
     assert(colorImage.getLayers() == 1 && depthImage.getLayers() == 1);
-    std::vector<std::vector<TriangleRenderState>> renderStates;
-    std::size_t triangleGroupCount = (triangleCount + ValueListSize - 1) / ValueListSize;
-    std::size_t setupThreadCount = triangleGroupCount / 1000;
-    if(setupThreadCount == 0)
-        setupThreadCount = 1;
-    std::size_t maxParallelism =4 * threadedTaskRunner.getParallelism();
-    if(setupThreadCount > maxParallelism)
-        setupThreadCount = maxParallelism;
-    renderStates.resize(setupThreadCount);
+    struct State final
+    {
+        std::vector<std::vector<TriangleRenderState>> renderStates;
+        std::size_t triangleGroupCount;
+        std::size_t setupThreadCount;
+        std::size_t maxParallelism;
+        std::size_t renderThreadCount;
+    };
+    const auto state = std::make_shared<State>();
+    state->triangleGroupCount = (triangleCount + ValueListSize - 1) / ValueListSize;
+    state->setupThreadCount = state->triangleGroupCount / 1000;
+    if(state->setupThreadCount == 0)
+        state->setupThreadCount = 1;
+    state->maxParallelism = 4 * threadedTaskRunner.getParallelism();
+    if(state->setupThreadCount > state->maxParallelism)
+        state->setupThreadCount = state->maxParallelism;
+    state->renderStates.resize(state->setupThreadCount);
+    const auto setupToRenderFence = std::make_shared<ThreadedTaskRunner::Fence>();
     runInThreads(
         threadedTaskRunner,
-        setupThreadCount,
-        [&](std::size_t threadIndex)
+        setupToRenderFence,
+        waitFence,
+        state->setupThreadCount,
+        [state, triangleCount, triangles, tform, &colorImage, &depthImage](std::size_t threadIndex)
         {
-            std::size_t startGroupIndex = threadIndex * (triangleGroupCount / setupThreadCount);
-            std::size_t endGroupIndex = (threadIndex + 1) * (triangleGroupCount / setupThreadCount);
-            if(endGroupIndex > triangleGroupCount)
-                endGroupIndex = triangleGroupCount;
-            renderStates[threadIndex].reserve(endGroupIndex - startGroupIndex);
+            std::size_t startGroupIndex =
+                threadIndex * (state->triangleGroupCount / state->setupThreadCount);
+            std::size_t endGroupIndex =
+                (threadIndex + 1) * (state->triangleGroupCount / state->setupThreadCount);
+            if(endGroupIndex > state->triangleGroupCount)
+                endGroupIndex = state->triangleGroupCount;
+            state->renderStates[threadIndex].reserve(endGroupIndex - startGroupIndex);
             for(std::size_t groupIndex = startGroupIndex; groupIndex < endGroupIndex; groupIndex++)
             {
                 Vector4FList p1, p2, p3;
@@ -893,44 +934,46 @@ void renderTriangles(ColorImage &colorImage,
                 p1 = tform.apply(p1);
                 p2 = tform.apply(p2);
                 p3 = tform.apply(p3);
-                renderStates[threadIndex].emplace_back(colorImage,
-                                                       depthImage,
-                                                       p1,
-                                                       p2,
-                                                       p3,
-                                                       colors,
-                                                       currentTriangleCount,
-                                                       0,
-                                                       0,
-                                                       colorImage.getWidth(),
-                                                       colorImage.getHeight());
-                if(!renderStates[threadIndex].back().good)
-                    renderStates[threadIndex].pop_back();
+                state->renderStates[threadIndex].emplace_back(colorImage,
+                                                              depthImage,
+                                                              p1,
+                                                              p2,
+                                                              p3,
+                                                              colors,
+                                                              currentTriangleCount,
+                                                              0,
+                                                              0,
+                                                              colorImage.getWidth(),
+                                                              colorImage.getHeight());
+                if(!state->renderStates[threadIndex].back().good)
+                    state->renderStates[threadIndex].pop_back();
             }
         });
-    std::size_t chunkXCount = (colorImage.getWidth() + ChunkLevel<MaxChunkLevel>::totalWidth - 1)
-                              / ChunkLevel<MaxChunkLevel>::totalWidth;
-    std::size_t chunkYCount = (colorImage.getHeight() + ChunkLevel<MaxChunkLevel>::totalHeight - 1)
-                              / ChunkLevel<MaxChunkLevel>::totalHeight;
-    std::size_t chunkCount = chunkXCount * chunkYCount;
-    std::size_t renderThreadCount = triangleCount * chunkCount;
-    if(renderThreadCount == 0)
-        renderThreadCount = 1;
-    if(renderThreadCount > chunkCount)
-        renderThreadCount = chunkCount;
-    if(renderThreadCount > maxParallelism)
-        renderThreadCount = maxParallelism;
+    const std::size_t chunkXCount = (colorImage.getWidth() + ChunkLevel<MaxChunkLevel>::totalWidth
+                                     - 1) / ChunkLevel<MaxChunkLevel>::totalWidth;
+    const std::size_t chunkYCount = (colorImage.getHeight() + ChunkLevel<MaxChunkLevel>::totalHeight
+                                     - 1) / ChunkLevel<MaxChunkLevel>::totalHeight;
+    const std::size_t chunkCount = chunkXCount * chunkYCount;
+    state->renderThreadCount = triangleCount * chunkCount;
+    if(state->renderThreadCount == 0)
+        state->renderThreadCount = 1;
+    if(state->renderThreadCount > chunkCount)
+        state->renderThreadCount = chunkCount;
+    if(state->renderThreadCount > state->maxParallelism)
+        state->renderThreadCount = state->maxParallelism;
     runInThreads(
         threadedTaskRunner,
-        renderThreadCount,
-        [&](std::size_t threadIndex)
+        signalFence,
+        setupToRenderFence,
+        state->renderThreadCount,
+        [state, chunkCount, chunkXCount](std::size_t threadIndex)
         {
             for(std::size_t chunkIndex = threadIndex; chunkIndex < chunkCount;
-                chunkIndex += renderThreadCount)
+                chunkIndex += state->renderThreadCount)
             {
                 std::size_t x = (chunkIndex % chunkXCount) * ChunkLevel<MaxChunkLevel>::totalWidth;
                 std::size_t y = (chunkIndex / chunkXCount) * ChunkLevel<MaxChunkLevel>::totalHeight;
-                for(auto &renderStateGroup : renderStates)
+                for(auto &renderStateGroup : state->renderStates)
                 {
                     for(auto &renderState : renderStateGroup)
                     {
@@ -1045,18 +1088,110 @@ Triangle getTriangle(std::size_t triangleIndex, std::size_t uCount, std::size_t 
     return retval;
 }
 
+#if 0
+constexpr bool renderWithViewerInside = false;
+#else
+constexpr bool renderWithViewerInside = true;
+#endif
+
+std::vector<Triangle> getTriangles()
+{
+    std::vector<Triangle> triangles;
+    std::size_t uCount = 20;
+    std::size_t vCount = 10;
+    std::size_t triangleCount = uCount * vCount * 2;
+    triangles.reserve(triangleCount);
+    for(std::size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
+    {
+        triangles.push_back(getTriangle(triangleIndex, uCount, vCount));
+        if(renderWithViewerInside)
+            std::swap(triangles.back().p1, triangles.back().p2);
+    }
+    return triangles;
+}
+
 void renderFrame(ColorImage &colorImage,
                  DepthImage &depthImage,
-                 ThreadedTaskRunner &threadedTaskRunner)
+                 ThreadedTaskRunner &threadedTaskRunner,
+                 const std::vector<Triangle> &triangles,
+                 std::shared_ptr<ThreadedTaskRunner::Fence> signalFence,
+                 std::shared_ptr<ThreadedTaskRunner::Fence> waitFence)
 {
-    clearImage(colorImage, 0, {0x80, 0xC0, 0xFF, 0xFF});
-    clearImage(depthImage, 0, INFINITY);
+    struct FillColorTask final : public ThreadedTaskRunner::Task
+    {
+        Color color;
+        std::size_t threadIndex;
+        std::size_t threadCount;
+        ColorImage &colorImage;
+        FillColorTask(std::shared_ptr<ThreadedTaskRunner::Fence> signalFence,
+                      std::shared_ptr<ThreadedTaskRunner::Fence> waitFence,
+                      Color color,
+                      std::size_t threadIndex,
+                      std::size_t threadCount,
+                      ColorImage &colorImage)
+            : Task(std::move(signalFence), std::move(waitFence)),
+              color(color),
+              threadIndex(threadIndex),
+              threadCount(threadCount),
+              colorImage(colorImage)
+        {
+        }
+        virtual void run() noexcept
+        {
+#if 1
+            colorImage.fillPart(color, threadIndex, threadCount);
+#endif
+        }
+    };
+    struct FillDepthTask final : public ThreadedTaskRunner::Task
+    {
+        float depth;
+        std::size_t threadIndex;
+        std::size_t threadCount;
+        DepthImage &depthImage;
+        FillDepthTask(std::shared_ptr<ThreadedTaskRunner::Fence> signalFence,
+                      std::shared_ptr<ThreadedTaskRunner::Fence> waitFence,
+                      float depth,
+                      std::size_t threadIndex,
+                      std::size_t threadCount,
+                      DepthImage &depthImage)
+            : Task(std::move(signalFence), std::move(waitFence)),
+              depth(depth),
+              threadIndex(threadIndex),
+              threadCount(threadCount),
+              depthImage(depthImage)
+        {
+        }
+        virtual void run() noexcept
+        {
+#if 1
+            depthImage.fillPart(depth, threadIndex, threadCount);
+#endif
+        }
+    };
+    auto clearToDrawFence = std::make_shared<ThreadedTaskRunner::Fence>();
+    for(std::size_t i = 0; i < threadedTaskRunner.getParallelism(); i++)
+        threadedTaskRunner.addTask(
+            std::make_shared<FillColorTask>(clearToDrawFence,
+                                            waitFence,
+                                            Color{0x80, 0xC0, 0xFF, 0xFF},
+                                            i,
+                                            threadedTaskRunner.getParallelism(),
+                                            colorImage));
+    for(std::size_t i = 0; i < threadedTaskRunner.getParallelism(); i++)
+        threadedTaskRunner.addTask(
+            std::make_shared<FillDepthTask>(clearToDrawFence,
+                                            waitFence,
+                                            INFINITY,
+                                            i,
+                                            threadedTaskRunner.getParallelism(),
+                                            depthImage));
     double currentTime = std::chrono::duration_cast<std::chrono::duration<double>>(
                              std::chrono::steady_clock::now().time_since_epoch()).count();
     Matrix4x4 tform;
     tform = Matrix4x4::rotateY(currentTime * M_PI * 2 / 10);
     tform = tform.concat(Matrix4x4::rotateX(currentTime * M_PI * 2 / std::sqrt(2) / 10));
-    tform = tform.concat(Matrix4x4::translate(0, 0, -2));
+    tform = tform.concat(Matrix4x4::translate(0, 0, renderWithViewerInside ? 0 : 2));
     float scaleX = colorImage.getWidth();
     float scaleY = colorImage.getHeight();
     scaleX /= colorImage.getHeight();
@@ -1085,34 +1220,106 @@ void renderFrame(ColorImage &colorImage,
                                    0,
                                    0.5f,
                                    0.5f));
-    std::size_t uCount = 20;
-    std::size_t vCount = 20;
-    std::size_t triangleCount = uCount * vCount * 2;
-    std::vector<Triangle> triangles;
-    triangles.reserve(triangleCount);
-    bool reverseTriangles = std::fmod(currentTime, 10) < 2;
-    for(std::size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
-    {
-        Vector4F currentP1, currentP2, currentP3;
-        triangles.push_back(getTriangle(triangleIndex, uCount, vCount));
-        if(reverseTriangles)
-        {
-            auto temp = triangles.back().p1;
-            triangles.back().p1 = triangles.back().p2;
-            triangles.back().p2 = temp;
-        }
-    }
-    renderTriangles(
-        colorImage, depthImage, triangles.data(), triangles.size(), tform, threadedTaskRunner);
+    renderTriangles(colorImage,
+                    depthImage,
+                    triangles.data(),
+                    triangles.size(),
+                    tform,
+                    threadedTaskRunner,
+                    signalFence,
+                    clearToDrawFence);
 }
 
+enum class PixelFormat
+{
+    RGBA,
+    ABGR,
+    RGBX,
+    XBGR,
+    ARGB,
+    BGRA,
+    XRGB,
+    BGRX,
+    RGB,
+    BGR,
+};
+
+std::pair<PixelFormat, Uint32> pickPixelFormat(SDL_Renderer *renderer) noexcept
+{
+    SDL_RendererInfo rendererInfo{};
+    if(0 == SDL_GetRendererInfo(renderer, &rendererInfo))
+    {
+        for(std::size_t i = 0; i < rendererInfo.num_texture_formats; i++)
+        {
+            switch(rendererInfo.texture_formats[i])
+            {
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+            case SDL_PIXELFORMAT_ABGR8888:
+                return {PixelFormat::RGBA, SDL_PIXELFORMAT_ABGR8888};
+            case SDL_PIXELFORMAT_BGRA8888:
+                return {PixelFormat::ARGB, SDL_PIXELFORMAT_BGRA8888};
+            case SDL_PIXELFORMAT_ARGB8888:
+                return {PixelFormat::BGRA, SDL_PIXELFORMAT_ARGB8888};
+            case SDL_PIXELFORMAT_RGBA8888:
+                return {PixelFormat::ABGR, SDL_PIXELFORMAT_RGBA8888};
+            // case SDL_PIXELFORMAT_XBGR8888:
+            //     return {PixelFormat::RGBX, SDL_PIXELFORMAT_XBGR8888};
+            case SDL_PIXELFORMAT_BGRX8888:
+                return {PixelFormat::XRGB, SDL_PIXELFORMAT_BGRX8888};
+            // case SDL_PIXELFORMAT_XRGB8888:
+            //     return {PixelFormat::BGRX, SDL_PIXELFORMAT_XRGB8888};
+            case SDL_PIXELFORMAT_RGBX8888:
+                return {PixelFormat::XBGR, SDL_PIXELFORMAT_RGBX8888};
+            case SDL_PIXELFORMAT_RGB888:
+                return {PixelFormat::BGR, SDL_PIXELFORMAT_RGB888};
+            case SDL_PIXELFORMAT_BGR888:
+                return {PixelFormat::RGB, SDL_PIXELFORMAT_BGR888};
+#else
+            case SDL_PIXELFORMAT_RGBA8888:
+                return {PixelFormat::RGBA, SDL_PIXELFORMAT_RGBA8888};
+            case SDL_PIXELFORMAT_ARGB8888:
+                return {PixelFormat::ARGB, SDL_PIXELFORMAT_ARGB8888};
+            case SDL_PIXELFORMAT_BGRA8888:
+                return {PixelFormat::BGRA, SDL_PIXELFORMAT_BGRA8888};
+            case SDL_PIXELFORMAT_ABGR8888:
+                return {PixelFormat::ABGR, SDL_PIXELFORMAT_ABGR8888};
+            case SDL_PIXELFORMAT_RGBX8888:
+                return {PixelFormat::RGBX, SDL_PIXELFORMAT_RGBX8888};
+            // case SDL_PIXELFORMAT_XRGB8888:
+            //     return {PixelFormat::XRGB, SDL_PIXELFORMAT_XRGB8888};
+            case SDL_PIXELFORMAT_BGRX8888:
+                return {PixelFormat::BGRX, SDL_PIXELFORMAT_BGRX8888};
+            // case SDL_PIXELFORMAT_XBGR8888:
+            //     return {PixelFormat::XBGR, SDL_PIXELFORMAT_XBGR8888};
+            case SDL_PIXELFORMAT_BGR888:
+                return {PixelFormat::BGR, SDL_PIXELFORMAT_BGR888};
+            case SDL_PIXELFORMAT_RGB888:
+                return {PixelFormat::RGB, SDL_PIXELFORMAT_RGB888};
+#endif
+            default:
+                continue;
+            }
+        }
+    }
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+    return {PixelFormat::RGBA, SDL_PIXELFORMAT_ABGR8888};
+#else
+    return {PixelFormat::RGBA, SDL_PIXELFORMAT_RGBA8888};
+#endif
+}
 
 int main()
 {
-    std::size_t initialWidth = 16, initialHeight = 9;
+    std::size_t initialWidth = 1366, initialHeight = 700;
     ColorImage colorImage(initialWidth, initialHeight, 1);
     DepthImage depthImage(initialWidth, initialHeight, 1);
+    const std::vector<Triangle> triangles = getTriangles();
+#if 0
+#warning in debug mode
+    ThreadedTaskRunner threadedTaskRunner{0};
+#else
     ThreadedTaskRunner threadedTaskRunner{};
+#endif
     if(SDL_Init(SDL_INIT_VIDEO) != 0)
     {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
@@ -1128,13 +1335,12 @@ int main()
         return 1;
     }
     SDL_SetWindowMinimumSize(window, 1, 1);
-#if SDL_BYTEORDER == SDL_BIG_ENDIAN
-    constexpr auto pixelFormat = SDL_PIXELFORMAT_RGBA8888;
-#else
-    constexpr auto pixelFormat = SDL_PIXELFORMAT_ABGR8888;
-#endif
-    SDL_Texture *texture = SDL_CreateTexture(
-        renderer, pixelFormat, SDL_TEXTUREACCESS_STREAMING, initialWidth, initialHeight);
+    auto pixelFormat = pickPixelFormat(renderer);
+    SDL_Texture *texture = SDL_CreateTexture(renderer,
+                                             std::get<1>(pixelFormat),
+                                             SDL_TEXTUREACCESS_STREAMING,
+                                             initialWidth,
+                                             initialHeight);
     if(!texture)
     {
         std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << std::endl;
@@ -1159,7 +1365,7 @@ int main()
             depthImage = DepthImage(width, height, 1);
             SDL_DestroyTexture(texture);
             texture = SDL_CreateTexture(
-                renderer, pixelFormat, SDL_TEXTUREACCESS_STREAMING, width, height);
+                renderer, std::get<1>(pixelFormat), SDL_TEXTUREACCESS_STREAMING, width, height);
             if(!texture)
             {
                 std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << std::endl;
@@ -1169,7 +1375,9 @@ int main()
                 return 1;
             }
         }
-        renderFrame(colorImage, depthImage, threadedTaskRunner);
+        auto frameRenderedFence = std::make_shared<ThreadedTaskRunner::Fence>();
+        renderFrame(
+            colorImage, depthImage, threadedTaskRunner, triangles, frameRenderedFence, nullptr);
         framesSinceLastFPSReport++;
         auto currentTime = std::chrono::steady_clock::now();
         if(currentTime - std::chrono::seconds(1) >= lastFPSReportTime)
@@ -1185,6 +1393,10 @@ int main()
         }
         void *pixels = nullptr;
         int pitch = 0;
+#if 0
+#define NO_COPY
+#endif
+#ifndef NO_COPY
         if(SDL_LockTexture(texture, nullptr, &pixels, &pitch) != 0)
         {
             std::cerr << "SDL_LockTexture failed: " << SDL_GetError() << std::endl;
@@ -1194,22 +1406,113 @@ int main()
             SDL_Quit();
             return 1;
         }
-        for(std::size_t y = 0; y < height; y++)
+#endif
+        struct CopyLineTask final : public ThreadedTaskRunner::Task
         {
-            unsigned char *currentPixel = static_cast<unsigned char *>(pixels) + pitch * y;
-            for(std::size_t x = 0; x < width; x++)
+            std::size_t height;
+            std::size_t width;
+            unsigned char *pixels;
+            std::size_t pitch;
+            std::size_t threadIndex;
+            std::size_t threadCount;
+            ColorImage &colorImage;
+            PixelFormat outputPixelFormat;
+            CopyLineTask(std::shared_ptr<ThreadedTaskRunner::Fence> signalFence,
+                         std::shared_ptr<ThreadedTaskRunner::Fence> waitFence,
+                         std::size_t height,
+                         std::size_t width,
+                         unsigned char *pixels,
+                         std::size_t pitch,
+                         std::size_t threadIndex,
+                         std::size_t threadCount,
+                         ColorImage &colorImage,
+                         PixelFormat outputPixelFormat)
+                : Task(std::move(signalFence), std::move(waitFence)),
+                  height(height),
+                  width(width),
+                  pixels(pixels),
+                  pitch(pitch),
+                  threadIndex(threadIndex),
+                  threadCount(threadCount),
+                  colorImage(colorImage),
+                  outputPixelFormat(outputPixelFormat)
             {
-                auto color = colorImage.getElementUnchecked(x, y, 0);
-                *currentPixel++ = color.x[0];
-                *currentPixel++ = color.y[0];
-                *currentPixel++ = color.z[0];
-                *currentPixel++ = color.w[0];
             }
-        }
+            virtual void run() noexcept
+            {
+#ifndef NO_COPY
+                std::size_t startY = threadIndex * height / threadCount;
+                std::size_t endY = (threadIndex + 1) * height / threadCount;
+                for(std::size_t y = startY; y < endY; y++)
+                {
+                    unsigned char *currentPixel = static_cast<unsigned char *>(pixels) + pitch * y;
+                    switch(outputPixelFormat)
+                    {
+#define WRITE_LINE_IN_FORMAT4(fmt, first, second, third, fourth)  \
+    case PixelFormat::fmt:                                        \
+        for(std::size_t x = 0, i = 0; x < width; x++)             \
+        {                                                         \
+            auto color = colorImage.getElementUnchecked(x, y, 0); \
+            *currentPixel++ = color.first[0];                     \
+            *currentPixel++ = color.second[0];                    \
+            *currentPixel++ = color.third[0];                     \
+            *currentPixel++ = color.fourth[0];                    \
+        }                                                         \
+        break;
+#define WRITE_LINE_IN_FORMAT3(fmt, first, second, third)          \
+    case PixelFormat::fmt:                                        \
+        for(std::size_t x = 0, i = 0; x < width; x++)             \
+        {                                                         \
+            auto color = colorImage.getElementUnchecked(x, y, 0); \
+            *currentPixel++ = color.first[0];                     \
+            *currentPixel++ = color.second[0];                    \
+            *currentPixel++ = color.third[0];                     \
+        }                                                         \
+        break;
+                        WRITE_LINE_IN_FORMAT4(RGBA, x, y, z, w)
+                        WRITE_LINE_IN_FORMAT4(ARGB, w, x, y, z)
+                        WRITE_LINE_IN_FORMAT4(BGRA, z, y, x, w)
+                        WRITE_LINE_IN_FORMAT4(ABGR, w, z, y, x)
+                        WRITE_LINE_IN_FORMAT4(RGBX, x, y, z, w)
+                        WRITE_LINE_IN_FORMAT4(XRGB, w, x, y, z)
+                        WRITE_LINE_IN_FORMAT4(BGRX, z, y, x, w)
+                        WRITE_LINE_IN_FORMAT4(XBGR, w, z, y, x)
+                        WRITE_LINE_IN_FORMAT3(RGB, x, y, z)
+                        WRITE_LINE_IN_FORMAT3(BGR, z, y, x)
+#undef WRITE_LINE_IN_FORMAT4
+#undef WRITE_LINE_IN_FORMAT3
+                    }
+                }
+#endif
+            }
+        };
+        std::size_t copyLineThreadCount = height;
+        if(copyLineThreadCount > threadedTaskRunner.getParallelism())
+            copyLineThreadCount = threadedTaskRunner.getParallelism();
+        if(copyLineThreadCount == 0)
+            copyLineThreadCount = 1;
+        auto copyLinesFence = std::make_shared<ThreadedTaskRunner::Fence>();
+        for(std::size_t i = 0; i < copyLineThreadCount; i++)
+            threadedTaskRunner.addTask(
+                std::make_shared<CopyLineTask>(copyLinesFence,
+                                               frameRenderedFence,
+                                               height,
+                                               width,
+                                               static_cast<unsigned char *>(pixels),
+                                               pitch,
+                                               i,
+                                               copyLineThreadCount,
+                                               colorImage,
+                                               std::get<0>(pixelFormat)));
+        copyLinesFence->waitForCompletion();
+#ifndef NO_COPY
         SDL_UnlockTexture(texture);
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, nullptr, nullptr);
         SDL_RenderPresent(renderer);
+#else
+#undef NO_COPY
+#endif
         SDL_Event event;
         while(SDL_PollEvent(&event))
         {

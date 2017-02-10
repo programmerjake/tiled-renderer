@@ -141,6 +141,32 @@ public:
             return getElementUnchecked(x, y, layer);
         return T();
     }
+    void fill(const T &v) noexcept
+    {
+        if(width != 0 && height != 0 && layers != 0)
+        {
+            std::size_t chunkSize =
+                ChunkLevel<MaxChunkLevel>::totalWidth * ChunkLevel<MaxChunkLevel>::totalHeight;
+            std::size_t elementCount = chunkSize * xChunkCount * yChunkCount * layers;
+            for(std::size_t i = 0; i < elementCount; i++)
+                elements.get()[i] = v;
+        }
+    }
+    void fillPart(const T &v, std::size_t partIndex, std::size_t partCount) noexcept
+    {
+        if(width != 0 && height != 0 && layers != 0)
+        {
+            std::size_t chunkSize =
+                ChunkLevel<MaxChunkLevel>::totalWidth * ChunkLevel<MaxChunkLevel>::totalHeight;
+            std::size_t elementCount = chunkSize * xChunkCount * yChunkCount * layers;
+            std::size_t startIndex =
+                static_cast<std::uint64_t>(partIndex) * elementCount / partCount;
+            std::size_t endIndex =
+                static_cast<std::uint64_t>(partIndex + 1) * elementCount / partCount;
+            for(std::size_t i = startIndex; i < endIndex; i++)
+                elements.get()[i] = v;
+        }
+    }
 };
 }
 

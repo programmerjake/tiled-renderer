@@ -26,7 +26,7 @@
 
 namespace tiled_renderer
 {
-constexpr std::size_t MaxChunkLevel = 2;
+constexpr std::size_t MaxChunkLevel = 3;
 
 template <std::size_t Level>
 struct ChunkLevel;
