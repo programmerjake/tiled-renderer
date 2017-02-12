@@ -30,6 +30,7 @@
 #include <string>
 #include <chrono>
 #include <vector>
+#include <pthread.h>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -92,9 +93,14 @@ struct MakeLevelList final
     typedef typename MakeLevelList<Level - 1, Level, Levels...>::type type;
 };
 
-constexpr std::size_t EdgeEquationFractionalBits = 14;
+#if 1
+constexpr std::size_t EdgeEquationFractionalBits = 32 - 1 - 12;
+#else
+#warning debugging
+constexpr std::size_t EdgeEquationFractionalBits = 32 - 21;
+#endif
 constexpr std::size_t PositionFractionalBits = 2;
-constexpr std::size_t WFractionalBits = 9;
+constexpr std::size_t WFractionalBits = 8;
 
 struct TriangleRenderState final
 {
@@ -230,6 +236,16 @@ struct TriangleRenderState final
         char unused[] = {fillPerLevelStates<Levels>(triangleIndex)...};
         static_cast<void>(unused);
     }
+    template <std::size_t fractionalBits>
+    static void checkFractionalBits() noexcept
+    {
+        static_assert(fractionalBits + 6LL < EdgeEquationFractionalBits, "");
+#if 0
+#warning debugging
+#else
+        static_assert(fractionalBits >= 12, "too few fractional bits to represent screen width");
+#endif
+    }
 
 private:
     bool setup() noexcept
@@ -237,30 +253,34 @@ private:
         Bool32List triangleCountMask(true);
         for(std::size_t i = triangleCount; i < ValueListSize; i++)
             triangleCountMask[i] = false;
-        float intPositionScale = static_cast<std::uint64_t>(1) << PositionFractionalBits;
-        float intWScale = static_cast<std::uint64_t>(1) << WFractionalBits;
-        I32List intPX[3] = {
-            static_cast<I32List>(triangleP1.x * FloatList(intPositionScale)),
-            static_cast<I32List>(triangleP2.x * FloatList(intPositionScale)),
-            static_cast<I32List>(triangleP3.x * FloatList(intPositionScale)),
+        constexpr unsigned fractionalBits = EdgeEquationFractionalBits - 6 - 1;
+        checkFractionalBits<fractionalBits>();
+        constexpr float scaleFactor = 1ULL << fractionalBits;
+        FloatList pX[3] = {
+            static_cast<FloatList>(static_cast<I32List>(FloatList(scaleFactor) * triangleP1.x)),
+            static_cast<FloatList>(static_cast<I32List>(FloatList(scaleFactor) * triangleP2.x)),
+            static_cast<FloatList>(static_cast<I32List>(FloatList(scaleFactor) * triangleP3.x)),
         };
-        I32List intPY[3] = {
-            static_cast<I32List>(triangleP1.y * FloatList(intPositionScale)),
-            static_cast<I32List>(triangleP2.y * FloatList(intPositionScale)),
-            static_cast<I32List>(triangleP3.y * FloatList(intPositionScale)),
+        FloatList pY[3] = {
+            static_cast<FloatList>(static_cast<I32List>(FloatList(scaleFactor) * triangleP1.y)),
+            static_cast<FloatList>(static_cast<I32List>(FloatList(scaleFactor) * triangleP2.y)),
+            static_cast<FloatList>(static_cast<I32List>(FloatList(scaleFactor) * triangleP3.y)),
         };
-        I32List intPW[3] = {
-            static_cast<I32List>(triangleP1.w * FloatList(intWScale)),
-            static_cast<I32List>(triangleP2.w * FloatList(intWScale)),
-            static_cast<I32List>(triangleP3.w * FloatList(intWScale)),
+        FloatList pW[3] = {
+            static_cast<FloatList>(static_cast<I32List>(FloatList(scaleFactor) * triangleP1.w)),
+            static_cast<FloatList>(static_cast<I32List>(FloatList(scaleFactor) * triangleP2.w)),
+            static_cast<FloatList>(static_cast<I32List>(FloatList(scaleFactor) * triangleP3.w)),
         };
-        FloatList signedArea = static_cast<FloatList>(intPW[0] * intPX[1] - intPW[1] * intPX[0])
-                                   * static_cast<FloatList>(intPY[2])
-                               + static_cast<FloatList>(intPW[2] * intPX[0] - intPW[0] * intPX[2])
-                                     * static_cast<FloatList>(intPY[1])
-                               + static_cast<FloatList>(intPW[1] * intPX[2] - intPW[2] * intPX[1])
-                                     * static_cast<FloatList>(intPY[0]);
-        drawTriangleMask &= signedArea > FloatList(0);
+        FloatList accurateSignedArea =
+            (triangleP1.w * triangleP2.x - triangleP2.w * triangleP1.x) * triangleP3.y
+            + (triangleP3.w * triangleP1.x - triangleP1.w * triangleP3.x) * triangleP2.y
+            + (triangleP2.w * triangleP3.x - triangleP3.w * triangleP2.x) * triangleP1.y;
+        drawTriangleMask &= accurateSignedArea > FloatList(0); // also filters out NaN values
+        FloatList signedArea = (pW[0] * pX[1] - pW[1] * pX[0]) * pY[2]
+                               + (pW[2] * pX[0] - pW[0] * pX[2]) * pY[1]
+                               + (pW[1] * pX[2] - pW[2] * pX[1]) * pY[0];
+        drawTriangleMask &=
+            signedArea > FloatList(0) | signedArea < FloatList(0); // also filters out NaN values
         drawTriangleMask &= triangleCountMask;
         if(!reduce(
                [](Bool32 a, Bool32 b)
@@ -271,14 +291,20 @@ private:
             return false;
         for(std::size_t i = 0; i < 3; i++)
         {
-            static_assert(WFractionalBits >= PositionFractionalBits, "");
-            edgeEquationConstants[i] =
-                (intPX[(i + 1) % 3] * intPY[(i + 2) % 3] - intPX[(i + 2) % 3] * intPY[(i + 1) % 3])
-                << I32List(WFractionalBits - PositionFractionalBits);
-            edgeEquationXSteps[i] =
-                intPY[(i + 1) % 3] * intPW[(i + 2) % 3] - intPY[(i + 2) % 3] * intPW[(i + 1) % 3];
-            edgeEquationYSteps[i] =
-                intPX[(i + 2) % 3] * intPW[(i + 1) % 3] - intPX[(i + 1) % 3] * intPW[(i + 2) % 3];
+            FloatList edgeEquationConstantsF =
+                pX[(i + 1) % 3] * pY[(i + 2) % 3] - pX[(i + 2) % 3] * pY[(i + 1) % 3];
+            FloatList edgeEquationXStepsF =
+                pY[(i + 1) % 3] * pW[(i + 2) % 3] - pY[(i + 2) % 3] * pW[(i + 1) % 3];
+            FloatList edgeEquationYStepsF =
+                pX[(i + 2) % 3] * pW[(i + 1) % 3] - pX[(i + 1) % 3] * pW[(i + 2) % 3];
+            FloatList scale = getApproximateNormalizationFactor(
+                fabs(edgeEquationXStepsF) + fabs(edgeEquationYStepsF), EdgeEquationFractionalBits);
+            edgeEquationConstantsF *= scale;
+            edgeEquationXStepsF *= scale;
+            edgeEquationYStepsF *= scale;
+            edgeEquationConstants[i] = static_cast<I32List>(edgeEquationConstantsF);
+            edgeEquationXSteps[i] = static_cast<I32List>(edgeEquationXStepsF);
+            edgeEquationYSteps[i] = static_cast<I32List>(edgeEquationYStepsF);
             edgeEquationConstants[i] =
                 select(signedArea < 0, edgeEquationConstants[i], -edgeEquationConstants[i]);
             edgeEquationXSteps[i] =
@@ -729,7 +755,7 @@ struct ThreadedTaskRunner final
         virtual ~Task() = default;
         virtual void run() noexcept = 0;
     };
-    std::vector<std::thread> threads;
+    std::vector<pthread_t> threads;
     std::mutex lock;
     std::condition_variable cond;
     bool done = false;
@@ -779,19 +805,28 @@ struct ThreadedTaskRunner final
         done = true;
         cond.notify_all();
         lockIt.unlock();
-        for(auto &thread : threads)
-            thread.join();
+        for(pthread_t thread : threads)
+            pthread_join(thread, nullptr);
     }
     explicit ThreadedTaskRunner(std::size_t threadCount = std::thread::hardware_concurrency())
     {
         threads.resize(threadCount);
-        for(auto &thread : threads)
+        pthread_attr_t threadAttr;
+        pthread_attr_init(&threadAttr);
+        pthread_attr_setstacksize(&threadAttr, static_cast<std::size_t>(32) << 20); // 32MiB
+        for(pthread_t &thread : threads)
         {
-            thread = std::thread([this]()
-                                 {
-                                     threadFn();
-                                 });
+            void *arg = static_cast<void *>(this);
+            pthread_create(&thread,
+                           &threadAttr,
+                           [](void *arg) -> void *
+                           {
+                               static_cast<ThreadedTaskRunner *>(arg)->threadFn();
+                               return nullptr;
+                           },
+                           arg);
         }
+        pthread_attr_destroy(&threadAttr);
     }
     void addNonwaitingTask(std::shared_ptr<Task> task, std::unique_lock<std::mutex> &lockIt)
     {
@@ -1088,7 +1123,7 @@ Triangle getTriangle(std::size_t triangleIndex, std::size_t uCount, std::size_t 
     return retval;
 }
 
-#if 0
+#if 1
 constexpr bool renderWithViewerInside = false;
 #else
 constexpr bool renderWithViewerInside = true;
@@ -1097,8 +1132,8 @@ constexpr bool renderWithViewerInside = true;
 std::vector<Triangle> getTriangles()
 {
     std::vector<Triangle> triangles;
-    std::size_t uCount = 20;
-    std::size_t vCount = 10;
+    std::size_t uCount = 8;
+    std::size_t vCount = 4;
     std::size_t triangleCount = uCount * vCount * 2;
     triangles.reserve(triangleCount);
     for(std::size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
@@ -1310,7 +1345,7 @@ std::pair<PixelFormat, Uint32> pickPixelFormat(SDL_Renderer *renderer) noexcept
 
 int main()
 {
-    std::size_t initialWidth = 1366, initialHeight = 700;
+    std::size_t initialWidth = 1280, initialHeight = 720;
     ColorImage colorImage(initialWidth, initialHeight, 1);
     DepthImage depthImage(initialWidth, initialHeight, 1);
     const std::vector<Triangle> triangles = getTriangles();

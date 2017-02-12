@@ -1019,6 +1019,68 @@ ValueList<T, N> select(const ValueList<typename BoolForType<T>::type, N> &condit
     detail::ValueListSelect<T, N>::run(retval, condition, trueValue, falseValue);
     return retval;
 }
+
+/** returns a factor that when multiplied by v scales v to around 1, actually somewhere in
+ * the range 1 to 2 when the input is not denormal
+ */
+template <std::size_t N>
+ValueList<float, N> getApproximateNormalizationFactor(ValueList<float, N> v,
+                                                      int targetMaxPowerOf2 = 1) noexcept
+{
+    static_assert(std::numeric_limits<float>::is_iec559, "");
+    typedef ValueList<std::uint32_t, N> UIntList;
+    UIntList intValues = reinterpret<std::uint32_t>(v);
+    constexpr std::uint32_t exponentBits = 0x7F800000UL;
+    constexpr std::uint32_t mantissaBits = 0x7FFFFFUL;
+    constexpr std::uint32_t lowestExponentBit = 0x800000UL;
+    // we calculate the value by splitting it into it's exponent, sign, and mantissa, and negating
+    // the exponent while accounting for the exponent bias
+    UIntList sign = intValues & UIntList(~exponentBits & ~mantissaBits);
+    UIntList processedExponent = (UIntList((targetMaxPowerOf2 - 2) * lowestExponentBit) - intValues)
+                                 & UIntList(exponentBits);
+    return reinterpret<float>(sign | processedExponent);
+}
+
+/** returns a factor that when multiplied by v scales v to around 1, actually somewhere in
+ * the range 1 to 2 when the input is not denormal
+ */
+template <std::size_t N>
+ValueList<double, N> getApproximateNormalizationFactor(ValueList<double, N> v,
+                                                       int targetMaxPowerOf2 = 1) noexcept
+{
+    static_assert(std::numeric_limits<double>::is_iec559, "");
+    typedef ValueList<std::uint64_t, N> UIntList;
+    UIntList intValues = reinterpret<std::uint64_t>(v);
+    constexpr std::uint64_t exponentBits = 0x7FF0000000000000ULL;
+    constexpr std::uint64_t mantissaBits = 0xFFFFFFFFFFFFFULL;
+    constexpr std::uint64_t lowestExponentBit = 0x10000000000000ULL;
+    // we calculate the value by splitting it into it's exponent, sign, and mantissa, and negating
+    // the exponent while accounting for the exponent bias
+    UIntList sign = intValues & UIntList(~exponentBits & ~mantissaBits);
+    UIntList processedExponent = (UIntList((targetMaxPowerOf2 - 2) * lowestExponentBit) - intValues)
+                                 & UIntList(exponentBits);
+    return reinterpret<double>(sign | processedExponent);
+}
+
+template <std::size_t N>
+ValueList<float, N> fabs(ValueList<float, N> v) noexcept
+{
+    static_assert(std::numeric_limits<float>::is_iec559, "");
+    typedef ValueList<std::uint32_t, N> UIntList;
+    UIntList intValues = reinterpret<std::uint32_t>(v);
+    constexpr std::uint32_t signBit = 1UL << 31;
+    return reinterpret<float>(intValues & UIntList(~signBit));
+}
+
+template <std::size_t N>
+ValueList<double, N> fabs(ValueList<double, N> v) noexcept
+{
+    static_assert(std::numeric_limits<double>::is_iec559, "");
+    typedef ValueList<std::uint64_t, N> UIntList;
+    UIntList intValues = reinterpret<std::uint64_t>(v);
+    constexpr std::uint64_t signBit = 1ULL << 63;
+    return reinterpret<double>(intValues & UIntList(~signBit));
+}
 }
 
 #ifdef __clang__
